@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vllm-nt"
+version = "0.1.0"
+description = "NineToothed operator plugin for vLLM"
+requires-python = ">=3.10"
+dependencies = [
+    "ninetoothed>=0.16.0",
+    "torch",
+]
+
+[project.entry-points."vllm.general_plugins"]
+vllm_nt = "vllm_nt:register"
+
+[tool.hatch.build.targets.wheel]
+packages = ["vllm_nt"]
