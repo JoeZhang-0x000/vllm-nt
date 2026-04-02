@@ -1,9 +1,12 @@
 """OOT (out-of-tree) layer overrides for vLLM.
 
-Importing this module registers NineToothed implementations as
-replacements for vLLM's built-in RMSNorm and SiluAndMul layers
-via the @CustomOp.register_oot() mechanism.
+Strategy:
+  1. Try @register_oot() — the clean, official vLLM extension path.
+  2. If that fails (API missing or version mismatch), fall back to
+     monkey-patching forward_oot / forward_native directly.
 """
+
+import logging
 
 import torch
 
@@ -13,38 +16,82 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm_nt._ntops.torch import rms_norm as nt_rms_norm
 from vllm_nt._ntops.torch import silu as nt_silu
 
-
-@RMSNorm.register_oot(name="RMSNorm")
-class NTRMSNorm(RMSNorm):
-    """RMSNorm using NineToothed kernel."""
-
-    def forward_oot(
-        self,
-        x: torch.Tensor,
-        residual: torch.Tensor | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if residual is not None:
-            x = x + residual
-            residual = x.to(x.dtype)
-
-        out = nt_rms_norm(
-            x,
-            normalized_shape=self.hidden_size,
-            weight=self.weight if self.has_weight else None,
-            eps=self.variance_epsilon,
-        )
-
-        if residual is not None:
-            return out, residual
-        return out
+logger = logging.getLogger("vllm_nt")
 
 
-@SiluAndMul.register_oot(name="SiluAndMul")
-class NTSiluAndMul(SiluAndMul):
-    """SiluAndMul using NineToothed kernel."""
+# ── NineToothed forward implementations ──────────────────────────
 
-    def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
-        d = x.shape[-1] // 2
-        gate = x[..., :d]
-        up = x[..., d:]
-        return nt_silu(gate) * up
+
+def _nt_rms_norm_forward(
+    self,
+    x: torch.Tensor,
+    residual: torch.Tensor | None = None,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    if residual is not None:
+        x = x + residual
+        residual = x.to(x.dtype)
+
+    out = nt_rms_norm(
+        x,
+        normalized_shape=self.hidden_size,
+        weight=self.weight if self.has_weight else None,
+        eps=self.variance_epsilon,
+    )
+
+    if residual is not None:
+        return out, residual
+    return out
+
+
+def _nt_silu_and_mul_forward(self, x: torch.Tensor) -> torch.Tensor:
+    d = x.shape[-1] // 2
+    return nt_silu(x[..., :d]) * x[..., d:]
+
+
+# ── Registration: OOT first, monkey-patch fallback ───────────────
+
+_registered = False
+
+
+def _try_register_oot() -> bool:
+    """Attempt clean OOT registration. Returns True on success."""
+    try:
+
+        @RMSNorm.register_oot(name="RMSNorm")
+        class NTRMSNorm(RMSNorm):
+            forward_oot = _nt_rms_norm_forward
+
+        @SiluAndMul.register_oot(name="SiluAndMul")
+        class NTSiluAndMul(SiluAndMul):
+            forward_oot = _nt_silu_and_mul_forward
+
+        return True
+    except Exception as e:
+        logger.warning("OOT registration failed (%s), will monkey-patch", e)
+        return False
+
+
+def _monkey_patch() -> None:
+    """Fallback: directly replace forward methods on vLLM layer classes."""
+    RMSNorm.forward_oot = _nt_rms_norm_forward
+    RMSNorm.forward_native = _nt_rms_norm_forward
+
+    SiluAndMul.forward_oot = _nt_silu_and_mul_forward
+    SiluAndMul.forward_native = _nt_silu_and_mul_forward
+
+    logger.info("vllm-nt: monkey-patched RMSNorm and SiluAndMul")
+
+
+def ensure_registered() -> None:
+    """Register NineToothed operators with vLLM (idempotent)."""
+    global _registered
+    if _registered:
+        return
+    _registered = True
+
+    if not _try_register_oot():
+        _monkey_patch()
+
+
+# Auto-register on import
+ensure_registered()
