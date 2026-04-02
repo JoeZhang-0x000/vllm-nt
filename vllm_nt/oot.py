@@ -22,11 +22,18 @@ logger = logging.getLogger("vllm_nt")
 # ── NineToothed forward implementations ──────────────────────────
 
 
+_nt_rms_norm_called = False
+
+
 def _nt_rms_norm_forward(
     self,
     x: torch.Tensor,
     residual: torch.Tensor | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    global _nt_rms_norm_called
+    if not _nt_rms_norm_called:
+        logger.info("vllm-nt: ninetoothed RMSNorm kernel invoked (shape=%s)", x.shape)
+        _nt_rms_norm_called = True
     if residual is not None:
         x = x + residual
         residual = x.to(x.dtype)
@@ -43,7 +50,14 @@ def _nt_rms_norm_forward(
     return out
 
 
+_nt_silu_called = False
+
+
 def _nt_silu_and_mul_forward(self, x: torch.Tensor) -> torch.Tensor:
+    global _nt_silu_called
+    if not _nt_silu_called:
+        logger.info("vllm-nt: ninetoothed SiluAndMul kernel invoked (shape=%s)", x.shape)
+        _nt_silu_called = True
     d = x.shape[-1] // 2
     return nt_silu(x[..., :d]) * x[..., d:]
 
@@ -65,6 +79,7 @@ def _try_register_oot() -> bool:
         class NTSiluAndMul(SiluAndMul):
             forward_oot = _nt_silu_and_mul_forward
 
+        logger.info("vllm-nt: OOT registration succeeded for RMSNorm and SiluAndMul")
         return True
     except Exception as e:
         logger.warning("OOT registration failed (%s), will monkey-patch", e)
