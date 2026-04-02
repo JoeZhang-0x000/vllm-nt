@@ -1,12 +1,8 @@
-"""OOT (out-of-tree) layer overrides for vLLM.
-
-Strategy:
-  1. Try @register_oot() — the clean, official vLLM extension path.
-  2. If that fails (API missing or version mismatch), fall back to
-     monkey-patching forward_oot / forward_native directly.
-"""
-
+import atexit
 import logging
+import os
+import sys
+from typing import Callable, Protocol, TypedDict
 
 import torch
 
@@ -17,12 +13,47 @@ from vllm_nt._ntops.torch import rms_norm as nt_rms_norm
 from vllm_nt._ntops.torch import silu as nt_silu
 
 logger = logging.getLogger("vllm_nt")
+_PARENT_PID_ENV = "VLLM_NT_PARENT_PID"
+os.environ.setdefault(_PARENT_PID_ENV, str(os.getpid()))
 
 
-# ── NineToothed forward implementations ──────────────────────────
+class OOTOperator(Protocol):
+    forward_oot: Callable[..., object]
+    forward_native: Callable[..., object]
+
+    @classmethod
+    def register_oot(cls, *, name: str) -> Callable[[type[object]], object]: ...
 
 
-_nt_rms_norm_called = False
+class OperatorSpec(TypedDict):
+    cls: type[OOTOperator]
+    forward: Callable[..., object]
+
+
+class OperatorStats(TypedDict):
+    hits: int
+    logged: bool
+    registered_via: str | None
+
+
+class UsageOperator(TypedDict):
+    hits: int
+    registered_via: str | None
+
+
+class UsageSummary(TypedDict):
+    registered_ops: list[str]
+    hit_ops: list[str]
+    missed_ops: list[str]
+    operators: dict[str, UsageOperator]
+
+
+def _record_hit(name: str, x: torch.Tensor) -> None:
+    stats = _OPERATOR_STATS[name]
+    stats["hits"] += 1
+    if not stats["logged"]:
+        logger.info("vllm-nt: ninetoothed %s kernel invoked (shape=%s)", name, x.shape)
+        stats["logged"] = True
 
 
 def _nt_rms_norm_forward(
@@ -30,10 +61,7 @@ def _nt_rms_norm_forward(
     x: torch.Tensor,
     residual: torch.Tensor | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    global _nt_rms_norm_called
-    if not _nt_rms_norm_called:
-        logger.info("vllm-nt: ninetoothed RMSNorm kernel invoked (shape=%s)", x.shape)
-        _nt_rms_norm_called = True
+    _record_hit("RMSNorm", x)
     if residual is not None:
         x = x + residual
         residual = x.to(x.dtype)
@@ -50,36 +78,36 @@ def _nt_rms_norm_forward(
     return out
 
 
-_nt_silu_called = False
-
-
 def _nt_silu_and_mul_forward(self, x: torch.Tensor) -> torch.Tensor:
-    global _nt_silu_called
-    if not _nt_silu_called:
-        logger.info("vllm-nt: ninetoothed SiluAndMul kernel invoked (shape=%s)", x.shape)
-        _nt_silu_called = True
+    _record_hit("SiluAndMul", x)
     d = x.shape[-1] // 2
     return nt_silu(x[..., :d]) * x[..., d:]
 
 
-# ── Registration: OOT first, monkey-patch fallback ───────────────
-
+_OPERATOR_SPECS: dict[str, OperatorSpec] = {
+    "RMSNorm": {"cls": RMSNorm, "forward": _nt_rms_norm_forward},
+    "SiluAndMul": {"cls": SiluAndMul, "forward": _nt_silu_and_mul_forward},
+}
+_OPERATOR_STATS: dict[str, OperatorStats] = {
+    name: {"hits": 0, "logged": False, "registered_via": None}
+    for name in _OPERATOR_SPECS
+}
+_summary_printed = False
 _registered = False
 
 
 def _try_register_oot() -> bool:
-    """Attempt clean OOT registration. Returns True on success."""
     try:
-
-        @RMSNorm.register_oot(name="RMSNorm")
-        class NTRMSNorm(RMSNorm):
-            forward_oot = _nt_rms_norm_forward
-
-        @SiluAndMul.register_oot(name="SiluAndMul")
-        class NTSiluAndMul(SiluAndMul):
-            forward_oot = _nt_silu_and_mul_forward
-
-        logger.info("vllm-nt: OOT registration succeeded for RMSNorm and SiluAndMul")
+        for name, spec in _OPERATOR_SPECS.items():
+            decorator = spec["cls"].register_oot(name=name)
+            decorator(
+                type(f"NT{name}", (spec["cls"],), {"forward_oot": spec["forward"]})
+            )
+            _OPERATOR_STATS[name]["registered_via"] = "oot"
+        logger.info(
+            "vllm-nt: OOT registration succeeded for %s",
+            ", ".join(_OPERATOR_SPECS),
+        )
         return True
     except Exception as e:
         logger.warning("OOT registration failed (%s), will monkey-patch", e)
@@ -87,18 +115,77 @@ def _try_register_oot() -> bool:
 
 
 def _monkey_patch() -> None:
-    """Fallback: directly replace forward methods on vLLM layer classes."""
-    RMSNorm.forward_oot = _nt_rms_norm_forward
-    RMSNorm.forward_native = _nt_rms_norm_forward
+    for name, spec in _OPERATOR_SPECS.items():
+        spec["cls"].forward_oot = spec["forward"]
+        spec["cls"].forward_native = spec["forward"]
+        _OPERATOR_STATS[name]["registered_via"] = "monkey_patch"
+    logger.info("vllm-nt: monkey-patched %s", ", ".join(_OPERATOR_SPECS))
 
-    SiluAndMul.forward_oot = _nt_silu_and_mul_forward
-    SiluAndMul.forward_native = _nt_silu_and_mul_forward
 
-    logger.info("vllm-nt: monkey-patched RMSNorm and SiluAndMul")
+def get_usage_summary() -> UsageSummary:
+    operators: dict[str, UsageOperator] = {
+        name: {
+            "hits": stats["hits"],
+            "registered_via": stats["registered_via"],
+        }
+        for name, stats in _OPERATOR_STATS.items()
+    }
+    hit_ops = [name for name, stats in operators.items() if stats["hits"] > 0]
+    return {
+        "registered_ops": list(_OPERATOR_SPECS),
+        "hit_ops": hit_ops,
+        "missed_ops": [name for name in _OPERATOR_SPECS if name not in hit_ops],
+        "operators": operators,
+    }
+
+
+def format_usage_summary(use_color: bool = True) -> str:
+    summary = get_usage_summary()
+    colors = {
+        "green": "\033[92m" if use_color else "",
+        "blue": "\033[94m" if use_color else "",
+        "red": "\033[91m" if use_color else "",
+        "yellow": "\033[93m" if use_color else "",
+        "reset": "\033[0m" if use_color else "",
+    }
+    lines = [f"{colors['yellow']}Operator usage summary{colors['reset']}"]
+    for name, stats in summary["operators"].items():
+        color = "green" if stats["hits"] else "red"
+        mode = stats["registered_via"] or "unregistered"
+        lines.append(
+            f"{colors[color]}- {name}: hits={stats['hits']} ({mode}){colors['reset']}"
+        )
+    missed = ", ".join(summary["missed_ops"]) or "None"
+    lines.append(f"{colors['blue']}Missed operators: {missed}{colors['reset']}")
+    return "\n".join(lines)
+
+
+def maybe_print_usage_summary(*, include_empty: bool = False) -> bool:
+    global _summary_printed
+    summary = get_usage_summary()
+    if _summary_printed or (not include_empty and not summary["hit_ops"]):
+        return False
+    print(format_usage_summary(), file=sys.stderr)
+    _summary_printed = True
+    return True
+
+
+def _reset_usage_state() -> None:
+    global _summary_printed
+    for stats in _OPERATOR_STATS.values():
+        stats.update(hits=0, logged=False)
+    _summary_printed = False
+
+
+def _print_worker_summary_on_exit() -> None:
+    if os.getpid() != int(os.environ.get(_PARENT_PID_ENV, os.getpid())):
+        maybe_print_usage_summary(include_empty=True)
+
+
+atexit.register(_print_worker_summary_on_exit)
 
 
 def ensure_registered() -> None:
-    """Register NineToothed operators with vLLM (idempotent)."""
     global _registered
     if _registered:
         return
@@ -108,5 +195,4 @@ def ensure_registered() -> None:
         _monkey_patch()
 
 
-# Auto-register on import
 ensure_registered()

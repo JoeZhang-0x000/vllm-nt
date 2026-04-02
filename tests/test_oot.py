@@ -1,7 +1,8 @@
 """Tests for NineToothed OOT layer overrides."""
 
 import pytest
-import torch
+
+torch = pytest.importorskip("torch")
 import torch.nn.functional as F
 
 

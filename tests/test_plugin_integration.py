@@ -3,11 +3,19 @@
 import ast
 from pathlib import Path
 
+import pytest
+
+
+def _require_runtime():
+    pytest.importorskip("torch")
+    pytest.importorskip("vllm")
+
 
 class TestPluginRegistration:
     """Test that register() correctly patches vLLM layers."""
 
     def test_register_patches_rmsnorm(self):
+        _require_runtime()
         from vllm.model_executor.layers.layernorm import RMSNorm
 
         from vllm_nt import register
@@ -25,6 +33,7 @@ class TestPluginRegistration:
         )
 
     def test_register_patches_silu_and_mul(self):
+        _require_runtime()
         from vllm.model_executor.layers.activation import SiluAndMul
 
         from vllm_nt import register
@@ -39,12 +48,58 @@ class TestPluginRegistration:
         )
 
     def test_register_is_idempotent(self):
+        _require_runtime()
         from vllm_nt import register
 
         # Should not raise on repeated calls
         register()
         register()
         register()
+
+    def test_usage_summary_auto_discovers_registered_ops(self):
+        _require_runtime()
+        from vllm_nt import register
+        from vllm_nt.oot import _OPERATOR_SPECS, _reset_usage_state, get_usage_summary
+
+        _reset_usage_state()
+        register()
+
+        summary = get_usage_summary()
+
+        assert set(summary["registered_ops"]) == set(_OPERATOR_SPECS)
+        assert set(summary["missed_ops"]) == set(_OPERATOR_SPECS)
+        assert all(
+            details["registered_via"] in {"oot", "monkey_patch"}
+            for details in summary["operators"].values()
+        )
+
+    def test_usage_summary_tracks_hits(self, monkeypatch):
+        _require_runtime()
+        import torch
+
+        from vllm_nt.oot import (
+            _nt_rms_norm_forward,
+            _reset_usage_state,
+            get_usage_summary,
+        )
+
+        class DummyRMSNorm:
+            hidden_size = 4
+            has_weight = False
+            weight = None
+            variance_epsilon = 1e-6
+
+        _reset_usage_state()
+        monkeypatch.setattr("vllm_nt.oot.nt_rms_norm", lambda *args, **kwargs: args[0])
+
+        output = _nt_rms_norm_forward(DummyRMSNorm(), torch.ones(1, 4))
+        summary = get_usage_summary()
+
+        assert not isinstance(output, tuple)
+        assert output.shape == (1, 4)
+        assert summary["operators"]["RMSNorm"]["hits"] == 1
+        assert "RMSNorm" in summary["hit_ops"]
+        assert "SiluAndMul" in summary["missed_ops"]
 
 
 class TestNoHardwareDependency:
@@ -86,6 +141,4 @@ class TestCodeSize:
                 continue
             total_lines += len(py_file.read_text().splitlines())
 
-        assert total_lines < 200, (
-            f"Core code is {total_lines} lines, should be < 200"
-        )
+        assert total_lines < 200, f"Core code is {total_lines} lines, should be < 200"
