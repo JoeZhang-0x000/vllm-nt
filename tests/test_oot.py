@@ -5,9 +5,18 @@ import torch
 import torch.nn.functional as F
 
 
-def _skip_if_no_cuda():
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
+def _get_device():
+    """Return the first available accelerator device, or skip."""
+    if torch.cuda.is_available():
+        return "cuda"
+    try:
+        import torch_mlu  # noqa: F401
+
+        if torch.mlu.is_available():
+            return "mlu"
+    except ImportError:
+        pass
+    pytest.skip("No accelerator device available (need CUDA or MLU)")
 
 
 class TestNTRMSNorm:
@@ -22,12 +31,12 @@ class TestNTRMSNorm:
     @pytest.mark.parametrize("shape", [(1, 4096), (32, 4096), (1, 32, 4096)])
     @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
     def test_forward_no_residual(self, shape, dtype):
-        _skip_if_no_cuda()
+        device = _get_device()
         from vllm_nt._ntops.torch import rms_norm
 
         hidden_size = shape[-1]
-        x = torch.randn(shape, dtype=dtype, device="cuda")
-        weight = torch.randn(hidden_size, dtype=dtype, device="cuda")
+        x = torch.randn(shape, dtype=dtype, device=device)
+        weight = torch.randn(hidden_size, dtype=dtype, device=device)
         eps = 1e-6
 
         output = rms_norm(x, normalized_shape=hidden_size, weight=weight, eps=eps)
@@ -38,18 +47,16 @@ class TestNTRMSNorm:
     @pytest.mark.parametrize("shape", [(1, 4096), (32, 4096)])
     @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
     def test_forward_with_residual(self, shape, dtype):
-        _skip_if_no_cuda()
+        device = _get_device()
         from vllm_nt._ntops.torch import rms_norm
 
         hidden_size = shape[-1]
-        x = torch.randn(shape, dtype=dtype, device="cuda")
-        residual = torch.randn(shape, dtype=dtype, device="cuda")
-        weight = torch.randn(hidden_size, dtype=dtype, device="cuda")
+        x = torch.randn(shape, dtype=dtype, device=device)
+        residual = torch.randn(shape, dtype=dtype, device=device)
+        weight = torch.randn(hidden_size, dtype=dtype, device=device)
         eps = 1e-6
 
-        # Simulate the fused add + rms_norm
         x_combined = x + residual
-        expected_residual = x_combined.to(dtype)
         expected_output = self._reference_rms_norm(x_combined, weight, eps)
 
         output = rms_norm(
@@ -69,10 +76,10 @@ class TestNTSiluAndMul:
     @pytest.mark.parametrize("shape", [(1, 8192), (32, 8192), (1, 32, 8192)])
     @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
     def test_forward(self, shape, dtype):
-        _skip_if_no_cuda()
+        device = _get_device()
         from vllm_nt._ntops.torch import silu
 
-        x = torch.randn(shape, dtype=dtype, device="cuda")
+        x = torch.randn(shape, dtype=dtype, device=device)
         d = x.shape[-1] // 2
         gate = x[..., :d]
         up = x[..., d:]
