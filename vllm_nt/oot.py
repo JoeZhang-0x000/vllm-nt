@@ -142,18 +142,14 @@ def get_usage_summary() -> UsageSummary:
 def format_usage_summary(use_color: bool = True) -> str:
     summary = get_usage_summary()
     colors = {
-        "green": "\033[92m" if use_color else "",
         "blue": "\033[94m" if use_color else "",
-        "red": "\033[91m" if use_color else "",
-        "yellow": "\033[93m" if use_color else "",
         "reset": "\033[0m" if use_color else "",
     }
-    lines = [f"{colors['yellow']}Operator usage summary{colors['reset']}"]
+    lines = [f"{colors['blue']}Operator usage summary{colors['reset']}"]
     for name, stats in summary["operators"].items():
-        color = "green" if stats["hits"] else "red"
         mode = stats["registered_via"] or "unregistered"
         lines.append(
-            f"{colors[color]}- {name}: hits={stats['hits']} ({mode}){colors['reset']}"
+            f"{colors['blue']}- {name}: hits={stats['hits']} ({mode}){colors['reset']}"
         )
     missed = ", ".join(summary["missed_ops"]) or "None"
     lines.append(f"{colors['blue']}Missed operators: {missed}{colors['reset']}")
