@@ -1,29 +1,21 @@
 import atexit
-from dataclasses import dataclass
 import logging
 import os
 import sys
 from typing import Any, Callable, cast
 
 import torch
+import torch.nn.functional as F
 from vllm.model_executor.layers import activation, layernorm
 
-from vllm_nt._ntops.torch import rms_norm as nt_rms_norm
+from vllm_nt._ntops.oot_support import OperatorStats, act_and_mul, norm
+from vllm_nt._ntops.torch import gelu as nt_gelu
 from vllm_nt._ntops.torch import silu as nt_silu
 
 logger = logging.getLogger("vllm_nt")
 _PARENT_PID_ENV = "VLLM_NT_PARENT_PID"
 os.environ.setdefault(_PARENT_PID_ENV, str(os.getpid()))
-RMSNorm = layernorm.RMSNorm
-SiluAndMul = activation.SiluAndMul
 OperatorSpec = tuple[type, Callable[..., object]]
-
-
-@dataclass
-class OperatorStats:
-    hits: int = 0
-    logged: bool = False
-    registered_via: str | None = None
 
 
 def _record_hit(name: str, x: torch.Tensor) -> None:
@@ -34,59 +26,45 @@ def _record_hit(name: str, x: torch.Tensor) -> None:
         stats.logged = True
 
 
-def _nt_rms_norm_forward(
-    self,
-    x: torch.Tensor,
-    residual: torch.Tensor | None = None,
-) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+def _nt_rms_norm_forward(self, x: torch.Tensor, residual: torch.Tensor | None = None):
     _record_hit("RMSNorm", x)
-    if residual is not None:
-        x = x + residual
-        residual = x.to(x.dtype)
-
-    out = nt_rms_norm(
-        x,
-        normalized_shape=self.hidden_size,
-        weight=self.weight if self.has_weight else None,
-        eps=self.variance_epsilon,
-    )
-    return (out, residual) if residual is not None else out
-
-
-def _nt_silu_and_mul_forward(self, x: torch.Tensor) -> torch.Tensor:
-    _record_hit("SiluAndMul", x)
-    d = x.shape[-1] // 2
-    return nt_silu(x[..., :d]) * x[..., d:]
-
-
-def _nt_mul_and_silu_forward(self, x: torch.Tensor) -> torch.Tensor:
-    _record_hit("MulAndSilu", x)
-    d = x.shape[-1] // 2
-    return x[..., :d] * nt_silu(x[..., d:])
+    return norm(self, x, self.weight if self.has_weight else None, residual)
 
 
 def _nt_gemma_rms_norm_forward(
     self, x: torch.Tensor, residual: torch.Tensor | None = None
 ):
     _record_hit("GemmaRMSNorm", x)
-    if residual is not None:
-        x = x + residual
-        residual = x
-    out = nt_rms_norm(
-        x,
-        normalized_shape=self.weight.shape[0],
-        weight=1.0 + self.weight,
-        eps=self.variance_epsilon,
+    return norm(self, x, 1.0 + self.weight, residual, gemma=True)
+
+
+def _nt_silu_and_mul_forward(self, x: torch.Tensor) -> torch.Tensor:
+    _record_hit("SiluAndMul", x)
+    return act_and_mul(x, nt_silu)
+
+
+def _nt_mul_and_silu_forward(self, x: torch.Tensor) -> torch.Tensor:
+    _record_hit("MulAndSilu", x)
+    return act_and_mul(x, nt_silu, reverse=True)
+
+
+def _nt_gelu_and_mul_forward(self, x: torch.Tensor) -> torch.Tensor:
+    _record_hit("GeluAndMul", x)
+    act = (
+        nt_gelu
+        if self.approximate == "tanh"
+        else lambda t: F.gelu(t, approximate=self.approximate)
     )
-    return (out, residual) if residual is not None else out
+    return act_and_mul(x, act)
 
 
 _OPERATOR_SPECS: dict[str, OperatorSpec] = {
-    "RMSNorm": (RMSNorm, _nt_rms_norm_forward),
-    "SiluAndMul": (SiluAndMul, _nt_silu_and_mul_forward),
+    "RMSNorm": (layernorm.RMSNorm, _nt_rms_norm_forward),
+    "SiluAndMul": (activation.SiluAndMul, _nt_silu_and_mul_forward),
 }
 for name, cls, forward in (
     ("MulAndSilu", getattr(activation, "MulAndSilu", None), _nt_mul_and_silu_forward),
+    ("GeluAndMul", getattr(activation, "GeluAndMul", None), _nt_gelu_and_mul_forward),
     (
         "GemmaRMSNorm",
         getattr(layernorm, "GemmaRMSNorm", None),
@@ -102,10 +80,10 @@ _registered = False
 
 def _try_register_oot() -> bool:
     try:
-        for name, spec in _OPERATOR_SPECS.items():
-            cls, forward = spec
-            decorator = cls.register_oot(name=name)
-            decorator(type(f"NT{name}", (cls,), {"forward_oot": forward}))
+        for name, (cls, forward) in _OPERATOR_SPECS.items():
+            cls.register_oot(name=name)(
+                type(f"NT{name}", (cls,), {"forward_oot": forward})
+            )
             _OPERATOR_STATS[name].registered_via = "oot"
         logger.info(
             "vllm-nt: OOT registration succeeded for %s", ", ".join(_OPERATOR_SPECS)
@@ -117,8 +95,7 @@ def _try_register_oot() -> bool:
 
 
 def _monkey_patch() -> None:
-    for name, spec in _OPERATOR_SPECS.items():
-        cls, forward = spec
+    for name, (cls, forward) in _OPERATOR_SPECS.items():
         cls.forward_oot = forward
         cls.forward_native = forward
         _OPERATOR_STATS[name].registered_via = "monkey_patch"
@@ -151,12 +128,12 @@ def format_usage_summary(use_color: bool = True) -> str:
     }
     lines = [f"{colors['blue']}Operator usage summary{colors['reset']}"]
     for name, stats in cast(dict[str, dict[str, Any]], summary["operators"]).items():
-        mode = stats["registered_via"] or "unregistered"
         lines.append(
-            f"{colors['blue']}- {name}: hits={stats['hits']} ({mode}){colors['reset']}"
+            f"{colors['blue']}- {name}: hits={stats['hits']} ({stats['registered_via'] or 'unregistered'}){colors['reset']}"
         )
-    missed = ", ".join(cast(list[str], summary["missed_ops"])) or "None"
-    lines.append(f"{colors['blue']}Missed operators: {missed}{colors['reset']}")
+    lines.append(
+        f"{colors['blue']}Missed operators: {', '.join(cast(list[str], summary['missed_ops'])) or 'None'}{colors['reset']}"
+    )
     return "\n".join(lines)
 
 

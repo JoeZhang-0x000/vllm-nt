@@ -67,6 +67,25 @@ class TestPluginRegistration:
             or hasattr(mul_and_silu, "name")
         )
 
+    def test_register_patches_optional_gelu_and_mul(self):
+        _require_runtime()
+        from vllm.model_executor.layers import activation
+
+        if not hasattr(activation, "GeluAndMul"):
+            pytest.skip("GeluAndMul is unavailable in this vLLM version")
+
+        from vllm_nt import register
+        from vllm_nt.oot import _nt_gelu_and_mul_forward
+
+        gelu_and_mul = activation.GeluAndMul
+        register()
+
+        assert (
+            gelu_and_mul.forward_oot == _nt_gelu_and_mul_forward
+            or gelu_and_mul.forward_native == _nt_gelu_and_mul_forward
+            or hasattr(gelu_and_mul, "name")
+        )
+
     def test_register_patches_optional_gemma_rms_norm(self):
         _require_runtime()
         from vllm.model_executor.layers import layernorm
@@ -153,8 +172,50 @@ class TestPluginRegistration:
 
         if hasattr(activation, "MulAndSilu"):
             assert "MulAndSilu" in summary["registered_ops"]
+        if hasattr(activation, "GeluAndMul"):
+            assert "GeluAndMul" in summary["registered_ops"]
         if hasattr(layernorm, "GemmaRMSNorm"):
             assert "GemmaRMSNorm" in summary["registered_ops"]
+
+    def test_gelu_and_mul_forward_uses_nt_tanh_path(self, monkeypatch):
+        _require_runtime()
+        import torch
+
+        from vllm_nt.oot import (
+            _nt_gelu_and_mul_forward,
+            _reset_usage_state,
+            get_usage_summary,
+        )
+
+        class DummyGeluAndMul:
+            approximate = "tanh"
+
+        _reset_usage_state()
+        monkeypatch.setattr("vllm_nt.oot.nt_gelu", lambda t: t + 1)
+
+        x = torch.arange(8, dtype=torch.float32).reshape(1, 8)
+        out = _nt_gelu_and_mul_forward(DummyGeluAndMul(), x)
+        summary = cast(dict[str, Any], get_usage_summary())
+
+        torch.testing.assert_close(out, (x[..., :4] + 1) * x[..., 4:])
+        assert summary["operators"]["GeluAndMul"]["hits"] == 1
+
+    def test_gelu_and_mul_forward_falls_back_for_non_tanh(self):
+        _require_runtime()
+        import torch
+        import torch.nn.functional as F
+
+        from vllm_nt.oot import _nt_gelu_and_mul_forward
+
+        class DummyGeluAndMul:
+            approximate = "none"
+
+        x = torch.randn(2, 8, dtype=torch.float32)
+        out = _nt_gelu_and_mul_forward(DummyGeluAndMul(), x)
+
+        torch.testing.assert_close(
+            out, F.gelu(x[..., :4], approximate="none") * x[..., 4:]
+        )
 
 
 class TestNoHardwareDependency:

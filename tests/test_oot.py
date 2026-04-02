@@ -89,3 +89,20 @@ class TestNTSiluAndMul:
         reference = self._reference_silu_and_mul(x)
 
         torch.testing.assert_close(output, reference, atol=0.01, rtol=0.01)
+
+
+class TestNTGelu:
+    def _reference_gelu(self, x):
+        return F.gelu(x, approximate="tanh")
+
+    @pytest.mark.parametrize("shape", [(1, 4096), (32, 4096), (1, 32, 4096)])
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+    def test_forward(self, shape, dtype):
+        device = _get_device()
+        from vllm_nt._ntops.torch import gelu
+
+        x = torch.randn(shape, dtype=dtype, device=device)
+        output = gelu(x)
+        reference = self._reference_gelu(x)
+
+        torch.testing.assert_close(output, reference, atol=0.02, rtol=0.02)
