@@ -10,7 +10,11 @@ class _CachedMakeDefaultConfig:
         self.max_num_configs = max_num_configs
 
 
-_cached_make_default_config = _CachedMakeDefaultConfig()
+# Default max_num_configs=1 disables autotuning, which forces
+# ninetoothed to use the loop-based grid launch path.
+# This avoids grid size limit errors on hardware (e.g. MLU)
+# where Triton's multi-dimensional grid support is limited.
+_cached_make_default_config = _CachedMakeDefaultConfig(max_num_configs=1)
 
 
 def get_default_num_warps():
