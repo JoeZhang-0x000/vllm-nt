@@ -2,6 +2,7 @@
 
 import ast
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -47,6 +48,44 @@ class TestPluginRegistration:
             or hasattr(SiluAndMul, "name")
         )
 
+    def test_register_patches_optional_mul_and_silu(self):
+        _require_runtime()
+        from vllm.model_executor.layers import activation
+
+        if not hasattr(activation, "MulAndSilu"):
+            pytest.skip("MulAndSilu is unavailable in this vLLM version")
+
+        from vllm_nt import register
+        from vllm_nt.oot import _nt_mul_and_silu_forward
+
+        mul_and_silu = activation.MulAndSilu
+        register()
+
+        assert (
+            mul_and_silu.forward_oot == _nt_mul_and_silu_forward
+            or mul_and_silu.forward_native == _nt_mul_and_silu_forward
+            or hasattr(mul_and_silu, "name")
+        )
+
+    def test_register_patches_optional_gemma_rms_norm(self):
+        _require_runtime()
+        from vllm.model_executor.layers import layernorm
+
+        if not hasattr(layernorm, "GemmaRMSNorm"):
+            pytest.skip("GemmaRMSNorm is unavailable in this vLLM version")
+
+        from vllm_nt import register
+        from vllm_nt.oot import _nt_gemma_rms_norm_forward
+
+        gemma_rms_norm = layernorm.GemmaRMSNorm
+        register()
+
+        assert (
+            gemma_rms_norm.forward_oot == _nt_gemma_rms_norm_forward
+            or gemma_rms_norm.forward_native == _nt_gemma_rms_norm_forward
+            or hasattr(gemma_rms_norm, "name")
+        )
+
     def test_register_is_idempotent(self):
         _require_runtime()
         from vllm_nt import register
@@ -64,7 +103,7 @@ class TestPluginRegistration:
         _reset_usage_state()
         register()
 
-        summary = get_usage_summary()
+        summary = cast(dict[str, Any], get_usage_summary())
 
         assert set(summary["registered_ops"]) == set(_OPERATOR_SPECS)
         assert set(summary["missed_ops"]) == set(_OPERATOR_SPECS)
@@ -93,13 +132,29 @@ class TestPluginRegistration:
         monkeypatch.setattr("vllm_nt.oot.nt_rms_norm", lambda *args, **kwargs: args[0])
 
         output = _nt_rms_norm_forward(DummyRMSNorm(), torch.ones(1, 4))
-        summary = get_usage_summary()
+        summary = cast(dict[str, Any], get_usage_summary())
 
         assert not isinstance(output, tuple)
         assert output.shape == (1, 4)
         assert summary["operators"]["RMSNorm"]["hits"] == 1
         assert "RMSNorm" in summary["hit_ops"]
         assert "SiluAndMul" in summary["missed_ops"]
+
+    def test_optional_ops_are_registered_in_summary_when_available(self):
+        _require_runtime()
+        from vllm.model_executor.layers import activation, layernorm
+
+        from vllm_nt import register
+        from vllm_nt.oot import _reset_usage_state, get_usage_summary
+
+        _reset_usage_state()
+        register()
+        summary = cast(dict[str, Any], get_usage_summary())
+
+        if hasattr(activation, "MulAndSilu"):
+            assert "MulAndSilu" in summary["registered_ops"]
+        if hasattr(layernorm, "GemmaRMSNorm"):
+            assert "GemmaRMSNorm" in summary["registered_ops"]
 
 
 class TestNoHardwareDependency:
