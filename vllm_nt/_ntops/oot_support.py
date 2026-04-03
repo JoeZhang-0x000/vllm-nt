@@ -45,7 +45,8 @@ def act_and_mul(
 def linear(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
-    output = nt_matmul(x.reshape(-1, x.shape[-1]), weight.T, out_dtype=x.dtype).reshape(
+    rhs = weight.T.contiguous()
+    output = nt_matmul(x.reshape(-1, x.shape[-1]), rhs, out_dtype=x.dtype).reshape(
         *x.shape[:-1], weight.shape[0]
     )
     return output if bias is None else output + bias

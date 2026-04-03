@@ -136,3 +136,19 @@ class TestNTEmbedding:
         reference = F.embedding(input_ids, DummyEmbeddingLayer.weight)
 
         torch.testing.assert_close(output, reference, atol=0.01, rtol=0.01)
+
+
+class TestNTLinear:
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_forward_matches_f_linear(self, dtype):
+        device = _get_device()
+        from vllm_nt._ntops.oot_support import linear
+
+        x = torch.randn((2, 3, 16), dtype=dtype, device=device)
+        weight = torch.randn((8, 16), dtype=dtype, device=device)
+        bias = torch.randn((8,), dtype=dtype, device=device)
+
+        output = linear(x, weight, bias)
+        reference = F.linear(x, weight, bias)
+
+        torch.testing.assert_close(output, reference, atol=0.05, rtol=0.05)
