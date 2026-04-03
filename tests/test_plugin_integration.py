@@ -175,7 +175,7 @@ class TestPluginRegistration:
 
         _reset_usage_state()
         monkeypatch.setattr(
-            "vllm_nt._ntops.patching.nt_rms_norm", lambda *args, **kwargs: args[0]
+            "vllm_nt._ntops.oot_support.nt_rms_norm", lambda *args, **kwargs: args[0]
         )
 
         output = _nt_rms_norm_forward(DummyRMSNorm(), torch.ones(1, 4))
