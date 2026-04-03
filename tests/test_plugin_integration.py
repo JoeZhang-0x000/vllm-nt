@@ -174,7 +174,9 @@ class TestPluginRegistration:
             variance_epsilon = 1e-6
 
         _reset_usage_state()
-        monkeypatch.setattr("vllm_nt.oot.nt_rms_norm", lambda *args, **kwargs: args[0])
+        monkeypatch.setattr(
+            "vllm_nt._ntops.patching.nt_rms_norm", lambda *args, **kwargs: args[0]
+        )
 
         output = _nt_rms_norm_forward(DummyRMSNorm(), torch.ones(1, 4))
         summary = cast(dict[str, Any], get_usage_summary())
@@ -217,7 +219,7 @@ class TestPluginRegistration:
             approximate = "tanh"
 
         _reset_usage_state()
-        monkeypatch.setattr("vllm_nt.oot.nt_gelu", lambda t: t + 1)
+        monkeypatch.setattr("vllm_nt._ntops.patching.nt_gelu", lambda t: t + 1)
 
         x = torch.arange(8, dtype=torch.float32).reshape(1, 8)
         out = _nt_gelu_and_mul_forward(DummyGeluAndMul(), x)
@@ -261,7 +263,7 @@ class TestPluginRegistration:
 
         _reset_usage_state()
         monkeypatch.setattr(
-            "vllm_nt.oot.linear",
+            "vllm_nt._ntops.patching.linear",
             lambda x, weight, bias=None: x @ weight.T
             if bias is None
             else x @ weight.T + bias,
@@ -290,7 +292,8 @@ class TestPluginRegistration:
             weight = torch.arange(12, dtype=torch.float32).reshape(3, 4)
 
         monkeypatch.setattr(
-            "vllm_nt.oot.linear", lambda x, weight, bias=None: x @ weight.T
+            "vllm_nt._ntops.patching.linear",
+            lambda x, weight, bias=None: x @ weight.T,
         )
 
         x = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
@@ -312,7 +315,8 @@ class TestPluginRegistration:
             weight = torch.arange(12, dtype=torch.float32).reshape(3, 4)
 
         monkeypatch.setattr(
-            "vllm_nt.oot.linear", lambda x, weight, bias=None: x @ weight.T
+            "vllm_nt._ntops.patching.linear",
+            lambda x, weight, bias=None: x @ weight.T,
         )
 
         x = torch.arange(8, dtype=torch.float32).reshape(2, 4)
