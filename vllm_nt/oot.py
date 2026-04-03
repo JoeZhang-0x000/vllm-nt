@@ -13,5 +13,8 @@ from ._ntops.patching import (
     get_usage_summary,
     maybe_print_usage_summary,
 )
+from ._ntops.oot_support import linear
+from ._ntops.torch.gelu import gelu as nt_gelu
+from ._ntops.torch.rms_norm import rms_norm as nt_rms_norm
 
 ensure_registered()
