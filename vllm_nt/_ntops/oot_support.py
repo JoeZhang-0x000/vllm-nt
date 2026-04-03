@@ -3,6 +3,7 @@ from typing import Callable
 
 import torch
 
+from vllm_nt._ntops.torch import matmul as nt_matmul
 from vllm_nt._ntops.torch import rms_norm as nt_rms_norm
 
 
@@ -38,3 +39,12 @@ def act_and_mul(
     d = x.shape[-1] // 2
     left, right = (x[..., d:], x[..., :d]) if reverse else (x[..., :d], x[..., d:])
     return act(left) * right
+
+
+def linear(
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
+) -> torch.Tensor:
+    output = nt_matmul(x.reshape(-1, x.shape[-1]), weight.T, out_dtype=x.dtype).reshape(
+        *x.shape[:-1], weight.shape[0]
+    )
+    return output if bias is None else output + bias

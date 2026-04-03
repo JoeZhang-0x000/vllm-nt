@@ -7,8 +7,9 @@ from typing import Any, Callable, cast
 import torch
 import torch.nn.functional as F
 from vllm.model_executor.layers import activation, layernorm
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 
-from vllm_nt._ntops.oot_support import OperatorStats, act_and_mul, norm
+from vllm_nt._ntops.oot_support import OperatorStats, act_and_mul, linear, norm
 from vllm_nt._ntops.torch import gelu as nt_gelu
 from vllm_nt._ntops.torch import silu as nt_silu
 
@@ -74,6 +75,7 @@ for name, cls, forward in (
     if cls is not None:
         _OPERATOR_SPECS[name] = (cls, forward)
 _OPERATOR_STATS = {name: OperatorStats() for name in _OPERATOR_SPECS}
+_OPERATOR_STATS["MatMul"] = OperatorStats()
 _summary_printed = False
 _registered = False
 
@@ -102,6 +104,18 @@ def _monkey_patch() -> None:
     logger.info("vllm-nt: monkey-patched %s", ", ".join(_OPERATOR_SPECS))
 
 
+def _nt_unquantized_linear_apply(
+    self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
+) -> torch.Tensor:
+    _record_hit("MatMul", x)
+    return linear(x, layer.weight, bias)
+
+
+def _patch_linear_method() -> None:
+    UnquantizedLinearMethod.apply = _nt_unquantized_linear_apply
+    _OPERATOR_STATS["MatMul"].registered_via = "monkey_patch"
+
+
 def get_usage_summary() -> dict[str, object]:
     operators = {
         name: {"hits": stats.hits, "registered_via": stats.registered_via}
@@ -113,9 +127,9 @@ def get_usage_summary() -> dict[str, object]:
         if cast(dict[str, Any], stats)["hits"] > 0
     ]
     return {
-        "registered_ops": list(_OPERATOR_SPECS),
+        "registered_ops": list(_OPERATOR_STATS),
         "hit_ops": hit_ops,
-        "missed_ops": [name for name in _OPERATOR_SPECS if name not in hit_ops],
+        "missed_ops": [name for name in _OPERATOR_STATS if name not in hit_ops],
         "operators": operators,
     }
 
@@ -170,6 +184,7 @@ def ensure_registered() -> None:
     _registered = True
     if not _try_register_oot():
         _monkey_patch()
+    _patch_linear_method()
 
 
 ensure_registered()

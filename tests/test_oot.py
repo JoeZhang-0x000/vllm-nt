@@ -106,3 +106,17 @@ class TestNTGelu:
         reference = self._reference_gelu(x)
 
         torch.testing.assert_close(output, reference, atol=0.02, rtol=0.02)
+
+
+class TestNTMatMul:
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_forward(self, dtype):
+        device = _get_device()
+        from vllm_nt._ntops.torch import matmul
+
+        lhs = torch.randn((64, 128), dtype=dtype, device=device)
+        rhs = torch.randn((128, 32), dtype=dtype, device=device)
+        output = matmul(lhs, rhs)
+        reference = torch.matmul(lhs, rhs)
+
+        torch.testing.assert_close(output, reference, atol=0.05, rtol=0.05)

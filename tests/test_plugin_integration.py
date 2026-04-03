@@ -112,6 +112,17 @@ class TestPluginRegistration:
         # Should not raise on repeated calls
         register()
         register()
+
+    def test_register_patches_unquantized_linear_method(self):
+        _require_runtime()
+        from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+
+        from vllm_nt import register
+        from vllm_nt.oot import _nt_unquantized_linear_apply
+
+        register()
+
+        assert UnquantizedLinearMethod.apply == _nt_unquantized_linear_apply
         register()
 
     def test_usage_summary_auto_discovers_registered_ops(self):
@@ -124,8 +135,9 @@ class TestPluginRegistration:
 
         summary = cast(dict[str, Any], get_usage_summary())
 
-        assert set(summary["registered_ops"]) == set(_OPERATOR_SPECS)
-        assert set(summary["missed_ops"]) == set(_OPERATOR_SPECS)
+        assert set(_OPERATOR_SPECS).issubset(set(summary["registered_ops"]))
+        assert "MatMul" in summary["registered_ops"]
+        assert set(summary["missed_ops"]) == set(summary["registered_ops"])
         assert all(
             details["registered_via"] in {"oot", "monkey_patch"}
             for details in summary["operators"].values()
@@ -216,6 +228,62 @@ class TestPluginRegistration:
         torch.testing.assert_close(
             out, F.gelu(x[..., :4], approximate="none") * x[..., 4:]
         )
+
+    def test_unquantized_linear_apply_uses_nt_matmul(self, monkeypatch):
+        _require_runtime()
+        import torch
+
+        from vllm_nt.oot import (
+            _nt_unquantized_linear_apply,
+            _reset_usage_state,
+            get_usage_summary,
+        )
+
+        class DummyLinearMethod:
+            pass
+
+        class DummyLayer:
+            weight = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+
+        _reset_usage_state()
+        monkeypatch.setattr(
+            "vllm_nt.oot.linear",
+            lambda x, weight, bias=None: x @ weight.T
+            if bias is None
+            else x @ weight.T + bias,
+        )
+
+        x = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+        bias = torch.ones(3, dtype=torch.float32)
+        out = _nt_unquantized_linear_apply(DummyLinearMethod(), DummyLayer(), x, bias)
+        summary = cast(dict[str, Any], get_usage_summary())
+
+        torch.testing.assert_close(out, x @ DummyLayer.weight.T + bias)
+        assert summary["operators"]["MatMul"]["hits"] == 1
+
+    def test_unquantized_linear_apply_reshapes_higher_rank_without_bias(
+        self, monkeypatch
+    ):
+        _require_runtime()
+        import torch
+
+        from vllm_nt.oot import _nt_unquantized_linear_apply
+
+        class DummyLinearMethod:
+            pass
+
+        class DummyLayer:
+            weight = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+
+        monkeypatch.setattr(
+            "vllm_nt.oot.linear", lambda x, weight, bias=None: x @ weight.T
+        )
+
+        x = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+        out = _nt_unquantized_linear_apply(DummyLinearMethod(), DummyLayer(), x)
+
+        torch.testing.assert_close(out, x @ DummyLayer.weight.T)
+        assert out.shape == (2, 3, 3)
 
 
 class TestNoHardwareDependency:
