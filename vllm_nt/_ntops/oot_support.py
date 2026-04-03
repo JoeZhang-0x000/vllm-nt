@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 import torch
+import torch.nn.functional as F
 
 from vllm_nt._ntops.torch import matmul as nt_matmul
 from vllm_nt._ntops.torch import rms_norm as nt_rms_norm
@@ -48,3 +49,7 @@ def linear(
         *x.shape[:-1], weight.shape[0]
     )
     return output if bias is None else output + bias
+
+
+def embedding(layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
+    return F.embedding(input_, layer.weight)

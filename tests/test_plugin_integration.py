@@ -125,6 +125,19 @@ class TestPluginRegistration:
         assert UnquantizedLinearMethod.apply == _nt_unquantized_linear_apply
         register()
 
+    def test_register_patches_unquantized_embedding_method(self):
+        _require_runtime()
+        from vllm.model_executor.layers.vocab_parallel_embedding import (
+            UnquantizedEmbeddingMethod,
+        )
+
+        from vllm_nt import register
+        from vllm_nt.oot import _nt_unquantized_embedding
+
+        register()
+
+        assert UnquantizedEmbeddingMethod.embedding == _nt_unquantized_embedding
+
     def test_usage_summary_auto_discovers_registered_ops(self):
         _require_runtime()
         from vllm_nt import register
@@ -137,6 +150,7 @@ class TestPluginRegistration:
 
         assert set(_OPERATOR_SPECS).issubset(set(summary["registered_ops"]))
         assert "MatMul" in summary["registered_ops"]
+        assert "Embedding" in summary["registered_ops"]
         assert set(summary["missed_ops"]) == set(summary["registered_ops"])
         assert all(
             details["registered_via"] in {"oot", "monkey_patch"}
@@ -308,6 +322,34 @@ class TestPluginRegistration:
         )
 
         torch.testing.assert_close(out, x @ DummyLayer.weight.T)
+
+    def test_unquantized_embedding_uses_plugin_path(self):
+        _require_runtime()
+        import torch
+
+        from vllm_nt.oot import (
+            _nt_unquantized_embedding,
+            _reset_usage_state,
+            get_usage_summary,
+        )
+
+        class DummyEmbeddingMethod:
+            pass
+
+        class DummyEmbeddingLayer:
+            weight = torch.randn((16, 4), dtype=torch.float32)
+
+        _reset_usage_state()
+        input_ids = torch.tensor([[0, 2], [3, 1]])
+        out = _nt_unquantized_embedding(
+            DummyEmbeddingMethod(), DummyEmbeddingLayer(), input_ids
+        )
+        summary = cast(dict[str, Any], get_usage_summary())
+
+        torch.testing.assert_close(
+            out, torch.nn.functional.embedding(input_ids, DummyEmbeddingLayer.weight)
+        )
+        assert summary["operators"]["Embedding"]["hits"] == 1
 
 
 class TestNoHardwareDependency:

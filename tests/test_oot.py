@@ -120,3 +120,19 @@ class TestNTMatMul:
         reference = torch.matmul(lhs, rhs)
 
         torch.testing.assert_close(output, reference, atol=0.05, rtol=0.05)
+
+
+class TestNTEmbedding:
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_forward(self, dtype):
+        device = _get_device()
+        from vllm_nt._ntops.oot_support import embedding
+
+        class DummyEmbeddingLayer:
+            weight = torch.randn((32, 16), dtype=dtype, device=device)
+
+        input_ids = torch.tensor([[0, 3, 7], [4, 1, 2]], device=device)
+        output = embedding(DummyEmbeddingLayer(), input_ids)
+        reference = F.embedding(input_ids, DummyEmbeddingLayer.weight)
+
+        torch.testing.assert_close(output, reference, atol=0.01, rtol=0.01)
