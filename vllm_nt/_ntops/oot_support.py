@@ -4,7 +4,7 @@ from typing import Callable
 import torch
 import torch.nn.functional as F
 
-from vllm_nt._ntops.torch import matmul as nt_matmul
+from vllm_nt._ntops.torch import linear as nt_linear
 from vllm_nt._ntops.torch import rms_norm as nt_rms_norm
 
 
@@ -45,11 +45,10 @@ def act_and_mul(
 def linear(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
-    rhs = weight.T.contiguous()
-    output = nt_matmul(x.reshape(-1, x.shape[-1]), rhs, out_dtype=x.dtype).reshape(
+    output = nt_linear(x.reshape(-1, x.shape[-1]), weight, bias).reshape(
         *x.shape[:-1], weight.shape[0]
     )
-    return output if bias is None else output + bias
+    return output
 
 
 def embedding(layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
