@@ -285,6 +285,30 @@ class TestPluginRegistration:
         torch.testing.assert_close(out, x @ DummyLayer.weight.T)
         assert out.shape == (2, 3, 3)
 
+    def test_unquantized_linear_apply_accepts_residual_kwarg(self, monkeypatch):
+        _require_runtime()
+        import torch
+
+        from vllm_nt.oot import _nt_unquantized_linear_apply
+
+        class DummyLinearMethod:
+            pass
+
+        class DummyLayer:
+            weight = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+
+        monkeypatch.setattr(
+            "vllm_nt.oot.linear", lambda x, weight, bias=None: x @ weight.T
+        )
+
+        x = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+        residual = torch.ones_like(x)
+        out = _nt_unquantized_linear_apply(
+            DummyLinearMethod(), DummyLayer(), x, residual=residual
+        )
+
+        torch.testing.assert_close(out, x @ DummyLayer.weight.T)
+
 
 class TestNoHardwareDependency:
     """Verify vllm_nt does not import any hardware-vendor plugins (R4)."""

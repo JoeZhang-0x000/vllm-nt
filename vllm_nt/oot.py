@@ -105,7 +105,11 @@ def _monkey_patch() -> None:
 
 
 def _nt_unquantized_linear_apply(
-    self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
+    self,
+    layer: torch.nn.Module,
+    x: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    **kwargs,
 ) -> torch.Tensor:
     _record_hit("MatMul", x)
     return linear(x, layer.weight, bias)
