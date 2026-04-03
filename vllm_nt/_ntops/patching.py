@@ -18,6 +18,7 @@ from vllm_nt._ntops.oot_support import (
     embedding,
     linear,
     norm,
+    nt_rms_norm,
 )
 from vllm_nt._ntops.torch import gelu as nt_gelu
 from vllm_nt._ntops.torch import silu as nt_silu
