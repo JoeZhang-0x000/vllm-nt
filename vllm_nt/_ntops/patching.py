@@ -98,6 +98,7 @@ _OPERATOR_STATS = {name: OperatorStats() for name in _OPERATOR_SPECS} | {
 _summary_printed = False
 _registered = False
 _linear_debug_compare_calls = 0
+_linear_debug_capture_skip_logged = False
 
 
 def _read_bool_env(name: str, default: bool = False) -> bool:
@@ -135,7 +136,7 @@ def _maybe_compare_unquantized_linear_output(
     bias: torch.Tensor | None,
     nt_output: torch.Tensor,
 ) -> torch.Tensor:
-    global _linear_debug_compare_calls
+    global _linear_debug_compare_calls, _linear_debug_capture_skip_logged
     if not _read_bool_env("VLLM_NT_DEBUG_LINEAR_COMPARE"):
         return nt_output
 
@@ -143,10 +144,22 @@ def _maybe_compare_unquantized_linear_output(
     nt_output_fp32 = nt_output.to(torch.float32)
     ref_output_fp32 = ref_output.to(torch.float32)
     abs_diff = (nt_output_fp32 - ref_output_fp32).abs()
-    max_abs_diff = abs_diff.max().item() if abs_diff.numel() else 0.0
-    mean_abs_diff = abs_diff.mean().item() if abs_diff.numel() else 0.0
-    ref_abs = ref_output_fp32.abs().clamp_min(1e-8)
-    max_rel_diff = (abs_diff / ref_abs).max().item() if abs_diff.numel() else 0.0
+    try:
+        max_abs_diff = abs_diff.max().item() if abs_diff.numel() else 0.0
+        mean_abs_diff = abs_diff.mean().item() if abs_diff.numel() else 0.0
+        ref_abs = ref_output_fp32.abs().clamp_min(1e-8)
+        max_rel_diff = (abs_diff / ref_abs).max().item() if abs_diff.numel() else 0.0
+    except RuntimeError as e:
+        message = str(e).lower()
+        if "capturing" in message or "queue is capturing" in message:
+            if not _linear_debug_capture_skip_logged:
+                logger.warning(
+                    "vllm-nt: skipping linear compare reductions during graph capture; "
+                    "rerun with eager mode to inspect decode numerics"
+                )
+                _linear_debug_capture_skip_logged = True
+            return nt_output
+        raise
 
     _linear_debug_compare_calls += 1
     compare_call = _linear_debug_compare_calls
@@ -281,12 +294,13 @@ def maybe_print_usage_summary(*, include_empty: bool = False) -> bool:
 
 
 def _reset_usage_state() -> None:
-    global _summary_printed, _linear_debug_compare_calls
+    global _summary_printed, _linear_debug_compare_calls, _linear_debug_capture_skip_logged
     for stats in _OPERATOR_STATS.values():
         stats.hits = 0
         stats.logged = False
     _summary_printed = False
     _linear_debug_compare_calls = 0
+    _linear_debug_capture_skip_logged = False
 
 
 def _print_worker_summary_on_exit() -> None:

@@ -21,6 +21,11 @@ def main():
     parser.add_argument(
         "--dtype", default="bfloat16", help="Model dtype (default: bfloat16)"
     )
+    parser.add_argument(
+        "--enforce-eager",
+        action="store_true",
+        help="Disable graph capture / compiled execution to simplify debugging",
+    )
     args = parser.parse_args()
 
     # vllm-nt registers automatically via entry_point,
@@ -35,7 +40,7 @@ def main():
     print(f"Dtype:  {args.dtype}")
     print("-" * 40)
 
-    llm = LLM(model=args.model, dtype=args.dtype)
+    llm = LLM(model=args.model, dtype=args.dtype, enforce_eager=args.enforce_eager)
     sampling_params = SamplingParams(max_tokens=args.max_tokens)
 
     outputs = llm.generate([args.prompt], sampling_params)
