@@ -97,102 +97,6 @@ _OPERATOR_STATS = {name: OperatorStats() for name in _OPERATOR_SPECS} | {
 }
 _summary_printed = False
 _registered = False
-_linear_debug_compare_calls = 0
-_linear_debug_capture_skip_logged = False
-
-
-def _read_bool_env(name: str, default: bool = False) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _read_int_env(name: str, default: int) -> int:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except ValueError:
-        logger.warning("vllm-nt: invalid integer for %s=%r; using %d", name, value, default)
-        return default
-
-
-def _read_float_env(name: str, default: float) -> float:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    try:
-        return float(value)
-    except ValueError:
-        logger.warning("vllm-nt: invalid float for %s=%r; using %.6f", name, value, default)
-        return default
-
-
-def _maybe_compare_unquantized_linear_output(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor | None,
-    residual: torch.Tensor | None,
-    nt_output: torch.Tensor,
-) -> torch.Tensor:
-    global _linear_debug_compare_calls, _linear_debug_capture_skip_logged
-    if not _read_bool_env("VLLM_NT_DEBUG_LINEAR_COMPARE"):
-        return nt_output
-
-    ref_output = F.linear(x, weight, bias)
-    if residual is not None:
-        ref_output = ref_output + residual
-    nt_output_fp32 = nt_output.to(torch.float32)
-    ref_output_fp32 = ref_output.to(torch.float32)
-    abs_diff = (nt_output_fp32 - ref_output_fp32).abs()
-    try:
-        max_abs_diff = abs_diff.max().item() if abs_diff.numel() else 0.0
-        mean_abs_diff = abs_diff.mean().item() if abs_diff.numel() else 0.0
-        ref_abs = ref_output_fp32.abs().clamp_min(1e-8)
-        max_rel_diff = (abs_diff / ref_abs).max().item() if abs_diff.numel() else 0.0
-    except RuntimeError as e:
-        message = str(e).lower()
-        if "capturing" in message or "queue is capturing" in message:
-            if not _linear_debug_capture_skip_logged:
-                logger.warning(
-                    "vllm-nt: skipping linear compare reductions during graph capture; "
-                    "rerun with eager mode to inspect decode numerics"
-                )
-                _linear_debug_capture_skip_logged = True
-            return nt_output
-        raise
-
-    _linear_debug_compare_calls += 1
-    compare_call = _linear_debug_compare_calls
-    max_log_calls = _read_int_env("VLLM_NT_DEBUG_LINEAR_COMPARE_MAX_CALLS", 10)
-    flattened_m = x.numel() // x.shape[-1]
-    if compare_call <= max_log_calls:
-        logger.warning(
-            "vllm-nt: linear compare[%d] x=%s weight=%s bias=%s dtype=%s device=%s flattened_m=%d max_abs=%.6e mean_abs=%.6e max_rel=%.6e",
-            compare_call,
-            tuple(x.shape),
-            tuple(weight.shape),
-            None if bias is None else tuple(bias.shape),
-            x.dtype,
-            x.device,
-            flattened_m,
-            max_abs_diff,
-            mean_abs_diff,
-            max_rel_diff,
-        )
-
-    fail_open_atol = _read_float_env("VLLM_NT_DEBUG_LINEAR_FAIL_OPEN_ATOL", 0.0)
-    if fail_open_atol > 0.0 and max_abs_diff > fail_open_atol:
-        logger.warning(
-            "vllm-nt: linear compare[%d] exceeded fail-open threshold %.6e; falling back to torch.nn.functional.linear",
-            compare_call,
-            fail_open_atol,
-        )
-        return ref_output
-
-    return nt_output
 
 
 def _try_register_oot() -> bool:
@@ -231,9 +135,7 @@ def _nt_unquantized_linear_apply(
     nt_output = linear(x, layer.weight, bias)
     if residual is not None:
         nt_output = nt_output + residual
-    return _maybe_compare_unquantized_linear_output(
-        x, layer.weight, bias, residual, nt_output
-    )
+    return nt_output
 
 
 def _nt_unquantized_embedding(
@@ -244,14 +146,8 @@ def _nt_unquantized_embedding(
 
 
 def _patch_leaf_methods() -> None:
-    if _read_bool_env("VLLM_NT_ENABLE_UNQUANTIZED_LINEAR_PATCH", True):
-        UnquantizedLinearMethod.apply = _nt_unquantized_linear_apply
-        _OPERATOR_STATS["MatMul"].registered_via = "monkey_patch"
-    else:
-        logger.info(
-            "vllm-nt: skipping UnquantizedLinearMethod.apply patch because "
-            "VLLM_NT_ENABLE_UNQUANTIZED_LINEAR_PATCH is disabled"
-        )
+    UnquantizedLinearMethod.apply = _nt_unquantized_linear_apply
+    _OPERATOR_STATS["MatMul"].registered_via = "monkey_patch"
     UnquantizedEmbeddingMethod.embedding = _nt_unquantized_embedding
     _OPERATOR_STATS["Embedding"].registered_via = "monkey_patch"
 
@@ -302,13 +198,11 @@ def maybe_print_usage_summary(*, include_empty: bool = False) -> bool:
 
 
 def _reset_usage_state() -> None:
-    global _summary_printed, _linear_debug_compare_calls, _linear_debug_capture_skip_logged
+    global _summary_printed
     for stats in _OPERATOR_STATS.values():
         stats.hits = 0
         stats.logged = False
     _summary_printed = False
-    _linear_debug_compare_calls = 0
-    _linear_debug_capture_skip_logged = False
 
 
 def _print_worker_summary_on_exit() -> None:
