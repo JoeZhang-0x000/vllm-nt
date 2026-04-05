@@ -231,6 +231,179 @@ def _build_unified_attention_2d(original: object) -> object:
     return unified_attention_2d
 
 
+def _extract_kv_cache_tensors(kv_cache: object) -> tuple[torch.Tensor, torch.Tensor] | None:
+    if isinstance(kv_cache, torch.Tensor):
+        if kv_cache.shape[0] >= 2:
+            return kv_cache[0], kv_cache[1]
+        return None
+    if isinstance(kv_cache, (tuple, list)):
+        if len(kv_cache) == 2 and isinstance(kv_cache[0], torch.Tensor):
+            first = kv_cache[0]
+            if first.ndim >= 1 and first.shape[0] >= 2:
+                return first[0], first[1]
+        if len(kv_cache) >= 2 and isinstance(kv_cache[0], torch.Tensor) and isinstance(
+            kv_cache[1], torch.Tensor
+        ):
+            return kv_cache[0], kv_cache[1]
+    return None
+
+
+def _build_unified_kv_cache_update(original: object) -> object:
+    original_fn = cast(Callable[..., object], original)
+
+    def unified_kv_cache_update(
+        key: torch.Tensor,
+        value: torch.Tensor,
+        layer_name: str,
+    ) -> torch.Tensor:
+        try:
+            attention_mod = importlib.import_module(
+                "vllm.model_executor.layers.attention.attention"
+            )
+            _, _, kv_cache, layer_slot_mapping = attention_mod.get_attention_context(
+                layer_name
+            )
+            caches = _extract_kv_cache_tensors(kv_cache)
+            if layer_slot_mapping is None or caches is None:
+                return original_fn(key, value, layer_name)
+            key_cache, value_cache = caches
+            store_kv_cache(
+                key,
+                value,
+                key_cache,
+                value_cache,
+                layer_slot_mapping.flatten(),
+            )
+            return torch.empty(0, device=key_cache.device, dtype=key_cache.dtype)
+        except Exception:
+            return original_fn(key, value, layer_name)
+
+    return _mark_function_patch(unified_kv_cache_update, "StoreKVCache")
+
+
+def _build_unified_attention_with_output(original: object) -> object:
+    original_fn = cast(Callable[..., object], original)
+
+    def unified_attention_with_output(
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        output: torch.Tensor,
+        layer_name: str,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
+        kv_cache_dummy_dep: torch.Tensor | None = None,
+    ) -> None:
+        try:
+            attention_mod = importlib.import_module(
+                "vllm.model_executor.layers.attention.attention"
+            )
+            attn_metadata, self, kv_cache, _ = attention_mod.get_attention_context(
+                layer_name
+            )
+            caches = _extract_kv_cache_tensors(kv_cache)
+            if caches is None:
+                return original_fn(
+                    query,
+                    key,
+                    value,
+                    output,
+                    layer_name,
+                    output_scale=output_scale,
+                    output_block_scale=output_block_scale,
+                    kv_cache_dummy_dep=kv_cache_dummy_dep,
+                )
+
+            key_cache, value_cache = caches
+            scale = getattr(self.impl, "scale", 1 / (query.shape[-1] ** 0.5))
+            seq_lens = getattr(attn_metadata, "seq_lens", None)
+            block_table = getattr(attn_metadata, "block_table", None)
+            query_start_loc = getattr(attn_metadata, "query_start_loc", None)
+            seq_start_loc = getattr(attn_metadata, "seq_start_loc", None)
+            max_query_len = getattr(attn_metadata, "max_query_len", None)
+
+            if (
+                seq_lens is None
+                or block_table is None
+                or query_start_loc is None
+                or max_query_len is None
+            ):
+                return original_fn(
+                    query,
+                    key,
+                    value,
+                    output,
+                    layer_name,
+                    output_scale=output_scale,
+                    output_block_scale=output_block_scale,
+                    kv_cache_dummy_dep=kv_cache_dummy_dep,
+                )
+
+            is_decode = query.shape[0] <= int(block_table.shape[0])
+            if is_decode:
+                _record_hit("PagedAttentionDecode", query)
+                decode_query = query.view(int(block_table.shape[0]), -1, query.shape[1], query.shape[2])
+                decode_output = paged_attention_decode(
+                    decode_query,
+                    key_cache,
+                    value_cache,
+                    seq_lens,
+                    block_table,
+                    softmax_scale=scale,
+                    causal=True,
+                )
+                output.copy_(decode_output.reshape_as(output))
+                return None
+
+            _record_hit("PagedAttentionPrefill", query)
+            if (
+                isinstance(key, torch.Tensor)
+                and isinstance(value, torch.Tensor)
+                and key.numel() > 0
+                and value.numel() > 0
+                and seq_start_loc is not None
+            ):
+                out = paged_attention_prefill(
+                    query,
+                    key,
+                    value,
+                    query_start_loc,
+                    seq_start_loc,
+                    int(max_query_len),
+                    softmax_scale=scale,
+                    causal=True,
+                )
+            else:
+                k_tokens, v_tokens, cu_seqlens_k = get_kv_from_cache(
+                    key_cache, value_cache, seq_lens, block_table
+                )
+                out = paged_attention_prefill(
+                    query,
+                    k_tokens,
+                    v_tokens,
+                    query_start_loc,
+                    cu_seqlens_k,
+                    int(max_query_len),
+                    softmax_scale=scale,
+                    causal=True,
+                )
+            output.copy_(out)
+            return None
+        except Exception:
+            return original_fn(
+                query,
+                key,
+                value,
+                output,
+                layer_name,
+                output_scale=output_scale,
+                output_block_scale=output_block_scale,
+                kv_cache_dummy_dep=kv_cache_dummy_dep,
+            )
+
+    return _mark_function_patch(unified_attention_with_output, "UnifiedAttentionWithOutput")
+
+
 def _build_flash_attn_varlen_patch(original: object) -> object:
     if _is_function_patch(original, "PagedAttentionPrefill"):
         return original
@@ -454,6 +627,20 @@ _OPERATOR_STATS = {name: OperatorStats() for name in _OPERATOR_SPECS} | {
 }
 _FUNCTION_PATCH_SPECS: tuple[FunctionPatchSpec, ...] = (
     FunctionPatchSpec(
+        patch_id="StoreKVCache",
+        module_path="vllm.model_executor.layers.attention.attention",
+        attr_name="unified_kv_cache_update",
+        required=False,
+        builder=_build_unified_kv_cache_update,
+    ),
+    FunctionPatchSpec(
+        patch_id="UnifiedAttentionWithOutput",
+        module_path="vllm.model_executor.layers.attention.attention",
+        attr_name="unified_attention_with_output",
+        required=False,
+        builder=_build_unified_attention_with_output,
+    ),
+    FunctionPatchSpec(
         patch_id="PagedAttentionPrefill",
         module_path="vllm.attention.layer",
         attr_name="maybe_get_vit_flash_attn_backend",
@@ -607,7 +794,7 @@ def _apply_function_patches() -> None:
                         spec=spec, target_obj=target_obj, original=original
                     )
                 )
-                if spec.patch_id == "UnifiedAttention2D":
+                if spec.patch_id in {"UnifiedAttention2D", "UnifiedAttentionWithOutput"}:
                     _OPERATOR_STATS["PagedAttentionPrefill"].registered_via = (
                         "function_patch"
                     )
