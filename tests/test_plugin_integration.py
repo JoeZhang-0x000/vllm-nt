@@ -2,6 +2,8 @@
 
 import ast
 from pathlib import Path
+import sys
+from types import ModuleType
 from typing import Any, cast
 
 import pytest
@@ -204,6 +206,54 @@ class TestPluginRegistration:
             assert "GeluAndMul" in summary["registered_ops"]
         if hasattr(layernorm, "GemmaRMSNorm"):
             assert "GemmaRMSNorm" in summary["registered_ops"]
+
+    def test_function_patch_spec_can_patch_fake_module(self, monkeypatch):
+        _require_runtime()
+        import vllm_nt._ntops.patching as patching
+
+        parent = ModuleType("fakepkg")
+        child = ModuleType("fakepkg.child")
+
+        def original(*args, **kwargs):
+            return ("original", args, kwargs)
+
+        child.unified_attention_2d = original
+        parent.child = child
+        monkeypatch.setitem(sys.modules, "fakepkg", parent)
+        monkeypatch.setitem(sys.modules, "fakepkg.child", child)
+
+        spec = patching.FunctionPatchSpec(
+            patch_id="UnifiedAttention2D",
+            module_path="fakepkg.child",
+            attr_name="unified_attention_2d",
+            required=True,
+            builder=lambda fn: (lambda *args, **kwargs: ("patched", fn(*args, **kwargs))),
+        )
+
+        monkeypatch.setattr(patching, "_FUNCTION_PATCH_SPECS", (spec,))
+        monkeypatch.setattr(patching, "_APPLIED_FUNCTION_PATCHES", [])
+        monkeypatch.setitem(
+            patching._OPERATOR_STATS,
+            "PagedAttentionPrefill",
+            patching.OperatorStats(),
+        )
+        monkeypatch.setitem(
+            patching._OPERATOR_STATS,
+            "PagedAttentionDecode",
+            patching.OperatorStats(),
+        )
+
+        patching._apply_function_patches()
+
+        assert child.unified_attention_2d(1, flag=True)[0] == "patched"
+        assert (
+            patching._OPERATOR_STATS["PagedAttentionPrefill"].registered_via
+            == "function_patch"
+        )
+        assert (
+            patching._OPERATOR_STATS["PagedAttentionDecode"].registered_via
+            == "function_patch"
+        )
 
     def test_gelu_and_mul_forward_uses_nt_tanh_path(self, monkeypatch):
         _require_runtime()
