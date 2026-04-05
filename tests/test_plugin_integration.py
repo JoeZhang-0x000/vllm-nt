@@ -255,6 +255,45 @@ class TestPluginRegistration:
             == "function_patch"
         )
 
+    def test_function_patch_spec_can_patch_fake_object_attr(self, monkeypatch):
+        _require_runtime()
+        import vllm_nt._ntops.patching as patching
+
+        parent = ModuleType("fakepkg_object")
+        child = ModuleType("fakepkg_object.child")
+
+        class _Functional:
+            @staticmethod
+            def scaled_dot_product_attention(*args, **kwargs):
+                return ("original", args, kwargs)
+
+        child.F = _Functional
+        parent.child = child
+        monkeypatch.setitem(sys.modules, "fakepkg_object", parent)
+        monkeypatch.setitem(sys.modules, "fakepkg_object.child", child)
+
+        spec = patching.FunctionPatchSpec(
+            patch_id="SDPA",
+            module_path="fakepkg_object.child",
+            object_name="F",
+            attr_name="scaled_dot_product_attention",
+            required=True,
+            builder=lambda fn: (lambda *args, **kwargs: ("patched", fn(*args, **kwargs))),
+        )
+
+        monkeypatch.setattr(patching, "_FUNCTION_PATCH_SPECS", (spec,))
+        monkeypatch.setattr(patching, "_APPLIED_FUNCTION_PATCHES", [])
+        monkeypatch.setitem(
+            patching._OPERATOR_STATS,
+            "SDPA",
+            patching.OperatorStats(),
+        )
+
+        patching._apply_function_patches()
+
+        assert child.F.scaled_dot_product_attention(1, flag=True)[0] == "patched"
+        assert patching._OPERATOR_STATS["SDPA"].registered_via == "function_patch"
+
     def test_gelu_and_mul_forward_uses_nt_tanh_path(self, monkeypatch):
         _require_runtime()
         import torch

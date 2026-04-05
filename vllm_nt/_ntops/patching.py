@@ -25,6 +25,7 @@ from vllm_nt._ntops.oot_support import (
     paged_attention_prefill,
     rope,
     sdpa,
+    store_kv_cache,
     nt_rms_norm,
 )
 from vllm_nt._ntops.torch import gelu as nt_gelu
@@ -51,6 +52,18 @@ class _AppliedFunctionPatch:
     spec: FunctionPatchSpec
     target_obj: object
     original: object
+
+
+def _mark_function_patch(fn: object, patch_id: str) -> object:
+    try:
+        setattr(fn, "_vllm_nt_patch_id", patch_id)
+    except Exception:
+        pass
+    return fn
+
+
+def _is_function_patch(fn: object, patch_id: str) -> bool:
+    return getattr(fn, "_vllm_nt_patch_id", None) == patch_id
 
 
 def _record_hit(name: str, x: torch.Tensor) -> None:
@@ -218,7 +231,38 @@ def _build_unified_attention_2d(original: object) -> object:
     return unified_attention_2d
 
 
+def _build_flash_attn_varlen_patch(original: object) -> object:
+    if _is_function_patch(original, "PagedAttentionPrefill"):
+        return original
+    original_fn = cast(Callable[..., object], original)
+
+    def wrapped(*args, **kwargs):
+        query = args[0] if args else kwargs.get("q")
+        if isinstance(query, torch.Tensor):
+            _record_hit("PagedAttentionPrefill", query)
+        try:
+            return paged_attention_prefill(*args, **kwargs)
+        except Exception:
+            return original_fn(*args, **kwargs)
+
+    return _mark_function_patch(wrapped, "PagedAttentionPrefill")
+
+
+def _build_vit_flash_attn_backend(original: object) -> object:
+    original_fn = cast(Callable[..., object], original)
+
+    def wrapped(*args, **kwargs):
+        backend, flash_attn = original_fn(*args, **kwargs)
+        if flash_attn is None:
+            return backend, flash_attn
+        return backend, _build_flash_attn_varlen_patch(flash_attn)
+
+    return wrapped
+
+
 def _build_rotary_forward_oot(original: object) -> object:
+    if _is_function_patch(original, "RoPE"):
+        return original
     original_fn = cast(Callable[..., object], original)
 
     def forward_oot(
@@ -245,10 +289,12 @@ def _build_rotary_forward_oot(original: object) -> object:
         except Exception:
             return original_fn(self, positions, query, key)
 
-    return forward_oot
+    return _mark_function_patch(forward_oot, "RoPE")
 
 
 def _build_sdpa_patch(original: object) -> object:
+    if _is_function_patch(original, "SDPA"):
+        return original
     original_fn = cast(Callable[..., object], original)
 
     def wrapped(*args, **kwargs):
@@ -260,7 +306,127 @@ def _build_sdpa_patch(original: object) -> object:
         except Exception:
             return original_fn(*args, **kwargs)
 
-    return wrapped
+    return _mark_function_patch(wrapped, "SDPA")
+
+
+def _build_mlu_flash_attention_impl_forward(original: object) -> object:
+    if _is_function_patch(original, "PagedAttentionDecode"):
+        return original
+    original_fn = cast(Callable[..., object], original)
+
+    def forward(
+        self,
+        layer: torch.nn.Module,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache,
+        attn_metadata,
+        output: torch.Tensor | None = None,
+        kwargs: dict[str, Any] | None = None,
+    ) -> torch.Tensor:
+        del layer
+        if output is None or attn_metadata is None:
+            return original_fn(self, layer, query, key, value, kv_cache, attn_metadata, output, kwargs)
+
+        if (
+            getattr(attn_metadata, "use_cascade", False)
+            or getattr(attn_metadata, "local_attn_metadata", None) is not None
+            or getattr(self, "use_mla", False)
+            or getattr(self, "kv_sharing_target_layer_name", None) is not None
+        ):
+            return original_fn(self, layer, query, key, value, kv_cache, attn_metadata, output, kwargs)
+
+        if not isinstance(kv_cache, (tuple, list)) or len(kv_cache) != 2:
+            return original_fn(self, layer, query, key, value, kv_cache, attn_metadata, output, kwargs)
+
+        kv_cache_tensors, kv_cache_scale = kv_cache
+        if not isinstance(kv_cache_tensors, torch.Tensor) or kv_cache_tensors.shape[0] < 2:
+            return original_fn(self, layer, query, key, value, kv_cache, attn_metadata, output, kwargs)
+        if isinstance(kv_cache_scale, torch.Tensor) and kv_cache_scale.numel() > 0:
+            return original_fn(self, layer, query, key, value, kv_cache, attn_metadata, output, kwargs)
+
+        key_cache = kv_cache_tensors[0]
+        value_cache = kv_cache_tensors[1]
+
+        try:
+            backend_mod = importlib.import_module(
+                "vllm_mlu.v1.attention.backends.flash_attn"
+            )
+            common_metadata = backend_mod.get_common_metadata()
+            num_actual_tokens = int(common_metadata.num_actual_tokens)
+            if num_actual_tokens <= 0:
+                return output
+
+            slot_mapping = attn_metadata.slot_mapping.flatten()[:num_actual_tokens]
+            store_kv_cache(
+                key[:num_actual_tokens],
+                value[:num_actual_tokens],
+                key_cache,
+                value_cache,
+                slot_mapping,
+            )
+
+            if common_metadata.is_prefill_only:
+                _record_hit("PagedAttentionPrefill", query[:num_actual_tokens])
+                num_prefill_query_tokens = int(common_metadata.num_prefill_query_tokens)
+                num_prefill_kv_tokens = int(common_metadata.num_prefill_kv_tokens)
+                output_slice = paged_attention_prefill(
+                    query[:num_prefill_query_tokens],
+                    key[:num_prefill_kv_tokens],
+                    value[:num_prefill_kv_tokens],
+                    attn_metadata.query_start_loc,
+                    attn_metadata.seq_start_loc,
+                    attn_metadata.max_query_len,
+                    softmax_scale=self.scale,
+                    causal=True,
+                )
+                output[:num_prefill_query_tokens].copy_(output_slice)
+                return output
+
+            if common_metadata.is_chunked:
+                _record_hit("PagedAttentionPrefill", query[:num_actual_tokens])
+                k_tokens, v_tokens, cu_seqlens_k = get_kv_from_cache(
+                    key_cache,
+                    value_cache,
+                    attn_metadata.seq_lens,
+                    attn_metadata.block_table,
+                )
+                output_slice = paged_attention_prefill(
+                    query[:num_actual_tokens],
+                    k_tokens,
+                    v_tokens,
+                    attn_metadata.query_start_loc,
+                    cu_seqlens_k,
+                    attn_metadata.max_query_len,
+                    softmax_scale=self.scale,
+                    causal=True,
+                )
+                output[:num_actual_tokens].copy_(output_slice)
+                return output
+
+            _record_hit("PagedAttentionDecode", query[:num_actual_tokens])
+            batch_size = int(attn_metadata.block_table.shape[0])
+            decode_query = query[:num_actual_tokens].view(
+                batch_size, -1, self.num_heads, self.head_size
+            )
+            decode_output = paged_attention_decode(
+                decode_query,
+                key_cache,
+                value_cache,
+                attn_metadata.seq_lens,
+                attn_metadata.block_table,
+                softmax_scale=self.scale,
+                causal=True,
+            )
+            output[:num_actual_tokens].copy_(
+                decode_output.reshape_as(output[:num_actual_tokens])
+            )
+            return output
+        except Exception:
+            return original_fn(self, layer, query, key, value, kv_cache, attn_metadata, output, kwargs)
+
+    return _mark_function_patch(forward, "PagedAttentionDecode")
 
 
 _OPERATOR_SPECS: dict[str, OperatorSpec] = {
@@ -287,6 +453,27 @@ _OPERATOR_STATS = {name: OperatorStats() for name in _OPERATOR_SPECS} | {
     "SDPA": OperatorStats(),
 }
 _FUNCTION_PATCH_SPECS: tuple[FunctionPatchSpec, ...] = (
+    FunctionPatchSpec(
+        patch_id="PagedAttentionPrefill",
+        module_path="vllm.attention.layer",
+        attr_name="maybe_get_vit_flash_attn_backend",
+        required=False,
+        builder=_build_vit_flash_attn_backend,
+    ),
+    FunctionPatchSpec(
+        patch_id="PagedAttentionPrefill",
+        module_path="vllm.attention.utils.fa_utils",
+        attr_name="flash_attn_varlen_func",
+        required=False,
+        builder=_build_flash_attn_varlen_patch,
+    ),
+    FunctionPatchSpec(
+        patch_id="PagedAttentionPrefill",
+        module_path="vllm.v1.attention.backends.flash_attn",
+        attr_name="flash_attn_varlen_func",
+        required=False,
+        builder=_build_flash_attn_varlen_patch,
+    ),
     FunctionPatchSpec(
         patch_id="UnifiedAttention2D",
         module_path="vllm.attention.ops.triton_unified_attention",
@@ -319,10 +506,26 @@ _FUNCTION_PATCH_SPECS: tuple[FunctionPatchSpec, ...] = (
     ),
     FunctionPatchSpec(
         patch_id="SDPA",
+        module_path="vllm.attention.layer",
+        object_name="F",
+        attr_name="scaled_dot_product_attention",
+        required=False,
+        builder=_build_sdpa_patch,
+    ),
+    FunctionPatchSpec(
+        patch_id="SDPA",
         module_path="vllm.attention.ops.sdpa",
         attr_name="scaled_dot_product_attention",
         required=False,
         builder=_build_sdpa_patch,
+    ),
+    FunctionPatchSpec(
+        patch_id="PagedAttentionDecode",
+        module_path="vllm_mlu.v1.attention.backends.flash_attn",
+        object_name="FlashAttentionImpl",
+        attr_name="forward",
+        required=False,
+        builder=_build_mlu_flash_attention_impl_forward,
     ),
 )
 _summary_printed = False

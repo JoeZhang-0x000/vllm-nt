@@ -32,23 +32,39 @@ def _csv(value: str) -> list[str]:
 @dataclass
 class TargetProbe:
     module_path: str
+    object_name: str | None
     attr_name: str
     exists: bool
     detail: str
 
 
-def _probe_target(module_path: str, attr_name: str) -> TargetProbe:
+def _probe_target(
+    module_path: str, attr_name: str, object_name: str | None = None
+) -> TargetProbe:
     try:
         module = importlib.import_module(module_path)
     except Exception as exc:
-        return TargetProbe(module_path, attr_name, False, f"import failed: {exc}")
+        return TargetProbe(
+            module_path, object_name, attr_name, False, f"import failed: {exc}"
+        )
 
-    if not hasattr(module, attr_name):
-        return TargetProbe(module_path, attr_name, False, "attribute missing")
+    target_obj = module
+    if object_name is not None:
+        if not hasattr(module, object_name):
+            return TargetProbe(
+                module_path, object_name, attr_name, False, "object missing"
+            )
+        target_obj = getattr(module, object_name)
 
-    target = getattr(module, attr_name)
+    if not hasattr(target_obj, attr_name):
+        return TargetProbe(
+            module_path, object_name, attr_name, False, "attribute missing"
+        )
+
+    target = getattr(target_obj, attr_name)
     return TargetProbe(
         module_path,
+        object_name,
         attr_name,
         True,
         f"resolved to {type(target).__name__}",
@@ -115,13 +131,13 @@ def main() -> int:
         print(f"mlu_available={torch.mlu.is_available()}")
 
     _print_header("Function Patch Targets")
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str | None, str]] = set()
     for spec in _FUNCTION_PATCH_SPECS:
-        key = (spec.module_path, spec.attr_name)
+        key = (spec.module_path, spec.object_name, spec.attr_name)
         if key in seen:
             continue
         seen.add(key)
-        probe = _probe_target(spec.module_path, spec.attr_name)
+        probe = _probe_target(spec.module_path, spec.attr_name, spec.object_name)
         print(json.dumps(asdict(probe), ensure_ascii=True))
 
     _print_header("Generation")
