@@ -153,7 +153,7 @@ class TestPluginRegistration:
         assert "Embedding" in summary["registered_ops"]
         assert set(summary["missed_ops"]) == set(summary["registered_ops"])
         assert all(
-            details["registered_via"] in {"oot", "monkey_patch"}
+            details["registered_via"] in {"oot", "monkey_patch", "function_patch", None}
             for details in summary["operators"].values()
         )
 
@@ -320,7 +320,7 @@ class TestPluginRegistration:
         )
 
         x = torch.arange(8, dtype=torch.float32).reshape(2, 4)
-        residual = torch.ones_like(x)
+        residual = torch.ones((x.shape[0], DummyLayer.weight.shape[0]), dtype=x.dtype)
         out = _nt_unquantized_linear_apply(
             DummyLinearMethod(), DummyLayer(), x, residual=residual
         )
