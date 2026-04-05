@@ -134,6 +134,7 @@ def _maybe_compare_unquantized_linear_output(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor | None,
+    residual: torch.Tensor | None,
     nt_output: torch.Tensor,
 ) -> torch.Tensor:
     global _linear_debug_compare_calls, _linear_debug_capture_skip_logged
@@ -141,6 +142,8 @@ def _maybe_compare_unquantized_linear_output(
         return nt_output
 
     ref_output = F.linear(x, weight, bias)
+    if residual is not None:
+        ref_output = ref_output + residual
     nt_output_fp32 = nt_output.to(torch.float32)
     ref_output_fp32 = ref_output.to(torch.float32)
     abs_diff = (nt_output_fp32 - ref_output_fp32).abs()
@@ -224,8 +227,13 @@ def _nt_unquantized_linear_apply(
     **kwargs,
 ) -> torch.Tensor:
     _record_hit("MatMul", x)
+    residual = kwargs.get("residual")
     nt_output = linear(x, layer.weight, bias)
-    return _maybe_compare_unquantized_linear_output(x, layer.weight, bias, nt_output)
+    if residual is not None:
+        nt_output = nt_output + residual
+    return _maybe_compare_unquantized_linear_output(
+        x, layer.weight, bias, residual, nt_output
+    )
 
 
 def _nt_unquantized_embedding(

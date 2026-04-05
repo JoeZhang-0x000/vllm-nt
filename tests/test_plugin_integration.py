@@ -325,7 +325,7 @@ class TestPluginRegistration:
             DummyLinearMethod(), DummyLayer(), x, residual=residual
         )
 
-        torch.testing.assert_close(out, x @ DummyLayer.weight.T)
+        torch.testing.assert_close(out, x @ DummyLayer.weight.T + residual)
 
     def test_unquantized_linear_apply_can_compare_with_reference(self, monkeypatch):
         _require_runtime()
@@ -354,6 +354,34 @@ class TestPluginRegistration:
         out = _nt_unquantized_linear_apply(DummyLinearMethod(), DummyLayer(), x, bias)
 
         torch.testing.assert_close(out, x @ DummyLayer.weight.T + bias)
+
+    def test_unquantized_linear_apply_compare_includes_residual(self, monkeypatch):
+        _require_runtime()
+        import torch
+
+        from vllm_nt.oot import _nt_unquantized_linear_apply, _reset_usage_state
+
+        class DummyLinearMethod:
+            pass
+
+        class DummyLayer:
+            weight = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+
+        _reset_usage_state()
+        monkeypatch.setenv("VLLM_NT_DEBUG_LINEAR_COMPARE", "1")
+        monkeypatch.setenv("VLLM_NT_DEBUG_LINEAR_COMPARE_MAX_CALLS", "1")
+        monkeypatch.setattr(
+            "vllm_nt._ntops.patching.linear",
+            lambda x, weight, bias=None: x @ weight.T,
+        )
+
+        x = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+        residual = torch.ones((2, 3), dtype=torch.float32)
+        out = _nt_unquantized_linear_apply(
+            DummyLinearMethod(), DummyLayer(), x, residual=residual
+        )
+
+        torch.testing.assert_close(out, x @ DummyLayer.weight.T + residual)
 
     def test_unquantized_linear_apply_fail_open_falls_back_to_reference(
         self, monkeypatch
