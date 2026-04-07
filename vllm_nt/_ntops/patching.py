@@ -1155,7 +1155,6 @@ def _build_mlu_flash_attention_impl_forward(original: object) -> object:
         output: torch.Tensor | None = None,
         kwargs: dict[str, Any] | None = None,
     ) -> torch.Tensor:
-        del layer
         if output is None or attn_metadata is None:
             return original_fn(self, layer, query, key, value, kv_cache, attn_metadata, output, kwargs)
 
