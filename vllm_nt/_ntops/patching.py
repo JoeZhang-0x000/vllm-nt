@@ -569,6 +569,70 @@ def _build_mlu_unified_attention_with_output(original: object) -> object:
     return _mark_function_patch(unified_attention_with_output, "UnifiedAttentionWithOutput")
 
 
+def _build_mlu_attention_forward(original: object) -> object:
+    original_fn = cast(Callable[..., object], original)
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        output_shape: torch.Size | None = None,
+        kwargs: dict[str, Any] | None = None,
+    ):
+        try:
+            if (
+                not getattr(self, "use_output", False)
+                or getattr(self, "use_direct_call", False)
+            ):
+                return original_fn(self, query, key, value, output_shape=output_shape, kwargs=kwargs)
+
+            layer_mod = importlib.import_module("vllm_mlu.attention.layer")
+            output_lse = None
+            output_shape = output_shape if output_shape is not None else query.shape
+            if getattr(self, "use_mla", False):
+                output_shape = [output_shape[0], self.num_heads * self.v_head_dim]
+            output = torch.empty(
+                output_shape,
+                dtype=self.dtype if query.dtype == torch.int8 else query.dtype,
+                device=query.device,
+            )
+            hidden_size = output_shape[-1]
+            query_reshaped = query.view(-1, self.num_heads, self.head_size)
+            output_reshaped = output.view(-1, self.num_heads, self.v_head_dim)
+            key_reshaped = (
+                None
+                if key is None
+                else key.view(-1, self.num_kv_heads, self.head_size)
+            )
+            value_reshaped = (
+                None
+                if value is None
+                else value.view(-1, self.num_kv_heads, self.v_head_dim)
+            )
+
+            attn_output_list = layer_mod.unified_attention_with_output(
+                query_reshaped,
+                key_reshaped,
+                value_reshaped,
+                output_reshaped,
+                self.layer_name,
+                kwargs=kwargs or {},
+            )
+            if (
+                isinstance(attn_output_list, (list, tuple))
+                and len(attn_output_list) > 1
+            ):
+                output_lse = attn_output_list[1]
+            if output_lse is not None:
+                return output.view(-1, hidden_size), output_lse
+            return output.view(-1, hidden_size)
+        except Exception:
+            return original_fn(self, query, key, value, output_shape=output_shape, kwargs=kwargs)
+
+    return _mark_function_patch(forward, "UnifiedAttentionWithOutput")
+
+
 def _build_flash_attn_varlen_patch(original: object) -> object:
     if _is_function_patch(original, "PagedAttentionPrefill"):
         return original
@@ -811,6 +875,22 @@ _FUNCTION_PATCH_SPECS: tuple[FunctionPatchSpec, ...] = (
         attr_name="unified_attention_with_output",
         required=False,
         builder=_build_mlu_unified_attention_with_output,
+    ),
+    FunctionPatchSpec(
+        patch_id="UnifiedAttentionWithOutput",
+        module_path="vllm.attention.layer",
+        object_name="Attention",
+        attr_name="forward",
+        required=False,
+        builder=_build_mlu_attention_forward,
+    ),
+    FunctionPatchSpec(
+        patch_id="UnifiedAttentionWithOutput",
+        module_path="vllm_mlu.attention.layer",
+        object_name="Attention_MluHjack",
+        attr_name="forward",
+        required=False,
+        builder=_build_mlu_attention_forward,
     ),
     FunctionPatchSpec(
         patch_id="PagedAttentionPrefill",
