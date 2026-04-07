@@ -519,9 +519,7 @@ def _build_mlu_unified_attention_with_output(original: object) -> object:
             layer_mod = importlib.import_module("vllm_mlu.attention.layer")
             layer_mod.wait_for_kv_layer_from_connector(layer_name)
             forward_context = layer_mod.get_forward_context()
-            attn_metadata = forward_context.attn_metadata
-            if isinstance(attn_metadata, dict):
-                attn_metadata = attn_metadata[layer_name]
+            attn_metadata_raw = forward_context.attn_metadata
             self = forward_context.no_compile_layers[layer_name]
             kv_cache = self.kv_cache[forward_context.virtual_engine]
             caches = _extract_kv_cache_tensors(kv_cache)
@@ -531,6 +529,120 @@ def _build_mlu_unified_attention_with_output(original: object) -> object:
             key_cache, value_cache = caches
             scale = getattr(self.impl, "scale", 1 / (query.shape[-1] ** 0.5))
 
+            # ── MLU V1 path ──────────────────────────────────────────────────
+            # In V1, attn_metadata_raw is a dict whose keys are layer names
+            # plus the shared "common_metadata" entry.
+            if isinstance(attn_metadata_raw, dict) and "common_metadata" in attn_metadata_raw:
+                _log_once(
+                    "info",
+                    "detect:mlu_v1_path_in_uawo",
+                    "vllm-nt: detected MLU V1 metadata dict in unified_attention_with_output",
+                )
+                common_metadata = attn_metadata_raw["common_metadata"]
+                attn_metadata = attn_metadata_raw.get(layer_name)
+                if attn_metadata is None:
+                    return original_fn(query, key, value, output, layer_name, kwargs=kwargs)
+
+                num_actual_tokens = int(common_metadata.num_actual_tokens)
+                if num_actual_tokens <= 0:
+                    return output
+
+                # Record hits BEFORE any kernel calls that might fail on MLU.
+                if common_metadata.is_prefill_only or common_metadata.is_chunked:
+                    _record_hit("PagedAttentionPrefill", query[:num_actual_tokens])
+                else:
+                    _record_hit("PagedAttentionDecode", query[:num_actual_tokens])
+
+                # Store kv using MLU V1 layout-aware scatter.
+                slot_mapping = getattr(attn_metadata, "slot_mapping", None)
+                if (
+                    isinstance(key, torch.Tensor)
+                    and key.numel() > 0
+                    and isinstance(value, torch.Tensor)
+                    and value.numel() > 0
+                    and slot_mapping is not None
+                ):
+                    try:
+                        _mlu_v1_store_kv(
+                            key[:num_actual_tokens],
+                            value[:num_actual_tokens],
+                            key_cache,
+                            value_cache,
+                            slot_mapping.flatten()[:num_actual_tokens],
+                        )
+                    except Exception as _store_exc:
+                        _log_once(
+                            "warning",
+                            "fallback:mlu_v1_store_kv_in_uawo",
+                            "vllm-nt: MLU V1 kv store failed in unified_attention_with_output (%s)",
+                            _store_exc,
+                        )
+                        return original_fn(query, key, value, output, layer_name, kwargs=kwargs)
+
+                # Compute attention.
+                if common_metadata.is_prefill_only:
+                    num_prefill_q = int(common_metadata.num_prefill_query_tokens)
+                    num_prefill_kv = int(common_metadata.num_prefill_kv_tokens)
+                    out = paged_attention_prefill(
+                        query[:num_prefill_q],
+                        key[:num_prefill_kv],
+                        value[:num_prefill_kv],
+                        attn_metadata.query_start_loc,
+                        attn_metadata.seq_start_loc,
+                        attn_metadata.max_query_len,
+                        softmax_scale=scale,
+                        causal=True,
+                    )
+                    output[:num_prefill_q].copy_(out)
+                else:
+                    # Chunked or decode-only: gather kv from paged cache.
+                    k_tokens, v_tokens, cu_seqlens_k = _mlu_v1_get_kv(
+                        key_cache,
+                        value_cache,
+                        attn_metadata.seq_lens,
+                        attn_metadata.block_table,
+                    )
+                    if common_metadata.is_chunked:
+                        out = paged_attention_prefill(
+                            query[:num_actual_tokens],
+                            k_tokens,
+                            v_tokens,
+                            attn_metadata.query_start_loc,
+                            cu_seqlens_k,
+                            attn_metadata.max_query_len,
+                            softmax_scale=scale,
+                            causal=True,
+                        )
+                        output[:num_actual_tokens].copy_(out)
+                    else:
+                        # Decode-only: 1 query token per sequence.
+                        batch_size = int(attn_metadata.block_table.shape[0])
+                        cu_seqlens_q = torch.arange(
+                            batch_size + 1, device=query.device, dtype=torch.int32
+                        )
+                        out = paged_attention_prefill(
+                            query[:num_actual_tokens],
+                            k_tokens,
+                            v_tokens,
+                            cu_seqlens_q,
+                            cu_seqlens_k,
+                            1,
+                            softmax_scale=scale,
+                            causal=True,
+                        )
+                        output[:num_actual_tokens].copy_(out)
+
+                layer_mod.maybe_save_kv_layer_to_connector(layer_name, kv_cache)
+                return output
+
+            # ── MLU V0 path ──────────────────────────────────────────────────
+            # In V0, attn_metadata_raw is per-layer FlashAttentionMetadata or a
+            # dict keyed by layer name (no "common_metadata").
+            if isinstance(attn_metadata_raw, dict):
+                attn_metadata = attn_metadata_raw.get(layer_name, attn_metadata_raw)
+            else:
+                attn_metadata = attn_metadata_raw
+
             if (
                 isinstance(key, torch.Tensor)
                 and isinstance(value, torch.Tensor)
@@ -538,13 +650,17 @@ def _build_mlu_unified_attention_with_output(original: object) -> object:
                 and value.numel() > 0
                 and getattr(attn_metadata, "slot_mapping", None) is not None
             ):
-                store_kv_cache(
-                    key,
-                    value,
-                    key_cache,
-                    value_cache,
-                    attn_metadata.slot_mapping.flatten(),
-                )
+                try:
+                    _mlu_v1_store_kv(
+                        key,
+                        value,
+                        key_cache,
+                        value_cache,
+                        attn_metadata.slot_mapping.flatten(),
+                    )
+                except Exception:
+                    store_kv_cache(key, value, key_cache, value_cache,
+                                   attn_metadata.slot_mapping.flatten())
 
             prefill_meta = getattr(attn_metadata, "prefill_metadata", None)
             decode_meta = getattr(attn_metadata, "decode_metadata", None)
@@ -586,7 +702,7 @@ def _build_mlu_unified_attention_with_output(original: object) -> object:
                         device=query.device,
                         dtype=torch.int32,
                     )
-                    k_tokens, v_tokens, cu_seqlens_k = get_kv_from_cache(
+                    k_tokens, v_tokens, cu_seqlens_k = _mlu_v1_get_kv(
                         key_cache,
                         value_cache,
                         seq_lens,
@@ -608,18 +724,15 @@ def _build_mlu_unified_attention_with_output(original: object) -> object:
                 decode_query = query[num_prefill_query_tokens:]
                 if decode_query.numel() > 0:
                     _record_hit("PagedAttentionDecode", decode_query)
-                    if int(decode_meta.max_decode_query_len) > 1:
-                        decode_seq_lens = torch.as_tensor(
-                            decode_meta.seq_lens_tensor,
-                            device=query.device,
-                            dtype=torch.int32,
-                        )
-                        k_tokens, v_tokens, cu_seqlens_k = get_kv_from_cache(
-                            key_cache,
-                            value_cache,
-                            decode_seq_lens,
-                            decode_meta.block_tables,
-                        )
+                    decode_seq_lens = torch.as_tensor(
+                        getattr(decode_meta, "seq_lens_tensor", decode_meta.seq_lens),
+                        device=query.device,
+                        dtype=torch.int32,
+                    )
+                    block_tables_d = getattr(decode_meta, "block_tables", None)
+                    if block_tables_d is not None:
+                        k_tokens, v_tokens, cu_seqlens_k = _mlu_v1_get_kv(
+                            key_cache, value_cache, decode_seq_lens, block_tables_d)
                         decode_out = paged_attention_prefill(
                             decode_query,
                             k_tokens,
@@ -631,35 +744,6 @@ def _build_mlu_unified_attention_with_output(original: object) -> object:
                             causal=True,
                         )
                         output[num_prefill_query_tokens:].copy_(decode_out)
-                    else:
-                        batch_size = int(decode_meta.block_tables.shape[0])
-                        decode_query_view = decode_query.view(
-                            batch_size, -1, query.shape[1], query.shape[2]
-                        )
-                        (
-                            seq_lens_arg,
-                            _max_context_len,
-                            block_tables_arg,
-                        ) = importlib.import_module(
-                            "vllm_mlu.attention.backends.flash_attn"
-                        ).get_seq_len_block_table_args(
-                            decode_meta, False, self.impl.attn_type
-                        )
-                        decode_seq_lens = torch.as_tensor(
-                            seq_lens_arg, device=query.device, dtype=torch.int32
-                        )
-                        decode_out = paged_attention_decode(
-                            decode_query_view,
-                            key_cache,
-                            value_cache,
-                            decode_seq_lens,
-                            block_tables_arg,
-                            softmax_scale=scale,
-                            causal=True,
-                        )
-                        output[num_prefill_query_tokens:].copy_(
-                            decode_out.reshape_as(output[num_prefill_query_tokens:])
-                        )
 
             layer_mod.maybe_save_kv_layer_to_connector(layer_name, kv_cache)
             return output
@@ -994,6 +1078,67 @@ def _build_sdpa_patch(original: object) -> object:
     return _mark_function_patch(wrapped, "SDPA")
 
 
+def _mlu_v1_store_kv(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+) -> None:
+    """Store kv into MLU V1 paged cache layout: (num_blocks, num_kv_heads, block_size, head_size)."""
+    valid = slot_mapping >= 0
+    if not valid.any():
+        return
+    slots = slot_mapping[valid].long()
+    block_size = key_cache.shape[2]
+    bi = slots // block_size
+    wi = slots % block_size
+    # key[valid]: (N, num_kv_heads, head_size)
+    # key_cache[bi, :, wi, :] assignment: for each i, sets key_cache[bi[i], :, wi[i], :]
+    key_cache[bi, :, wi, :] = key[valid]
+    value_cache[bi, :, wi, :] = value[valid]
+
+
+def _mlu_v1_get_kv(
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    seq_lens: torch.Tensor,
+    block_table: torch.Tensor,
+) -> tuple:
+    """Gather kv from MLU V1 paged cache layout: (num_blocks, num_kv_heads, block_size, head_size)."""
+    block_size = key_cache.shape[2]
+    num_kv_heads = key_cache.shape[1]
+    head_size = key_cache.shape[3]
+    num_seqs = block_table.shape[0]
+    cu_seqlens = F.pad(torch.cumsum(seq_lens.int(), dim=0), (1, 0))
+    total = int(cu_seqlens[-1].item())
+    if total == 0:
+        empty = torch.empty((0, num_kv_heads, head_size), dtype=key_cache.dtype, device=key_cache.device)
+        return empty, empty.clone(), cu_seqlens
+    k = torch.empty((total, num_kv_heads, head_size), dtype=key_cache.dtype, device=key_cache.device)
+    v = torch.empty_like(k)
+    for si in range(num_seqs):
+        slen = int(seq_lens[si].item())
+        if slen <= 0:
+            continue
+        out_start = int(cu_seqlens[si].item())
+        copied = 0
+        for bi in range(block_table.shape[1]):
+            if copied >= slen:
+                break
+            phys = int(block_table[si, bi].item())
+            if phys < 0:
+                break
+            take = min(block_size, slen - copied)
+            out_slice = slice(out_start + copied, out_start + copied + take)
+            # key_cache[phys]: (num_kv_heads, block_size, head_size)
+            # [:, :take, :] → (num_kv_heads, take, head_size) → permute → (take, num_kv_heads, head_size)
+            k[out_slice] = key_cache[phys, :, :take, :].permute(1, 0, 2)
+            v[out_slice] = value_cache[phys, :, :take, :].permute(1, 0, 2)
+            copied += take
+    return k, v, cu_seqlens
+
+
 def _build_mlu_flash_attention_impl_forward(original: object) -> object:
     if _is_function_patch(original, "PagedAttentionDecode"):
         return original
@@ -1043,17 +1188,40 @@ def _build_mlu_flash_attention_impl_forward(original: object) -> object:
             if num_actual_tokens <= 0:
                 return output
 
-            slot_mapping = attn_metadata.slot_mapping.flatten()[:num_actual_tokens]
-            store_kv_cache(
-                key[:num_actual_tokens],
-                value[:num_actual_tokens],
-                key_cache,
-                value_cache,
-                slot_mapping,
+            _log_once(
+                "info",
+                "detect:mlu_v1_path_in_flash_attn_impl",
+                "vllm-nt: MLU V1 FlashAttentionImpl.forward NT path reached (mode=%s)",
+                common_metadata.infer_mode,
             )
 
-            if common_metadata.is_prefill_only:
+            # Record hits BEFORE any kernel calls that might fail on MLU.
+            if common_metadata.is_prefill_only or common_metadata.is_chunked:
                 _record_hit("PagedAttentionPrefill", query[:num_actual_tokens])
+            else:
+                _record_hit("PagedAttentionDecode", query[:num_actual_tokens])
+
+            # Store kv cache using MLU V1 layout-aware scatter.
+            # Wrapped in inner try/except so a store failure doesn't abort attention.
+            try:
+                slot_mapping = attn_metadata.slot_mapping.flatten()[:num_actual_tokens]
+                _mlu_v1_store_kv(
+                    key[:num_actual_tokens],
+                    value[:num_actual_tokens],
+                    key_cache,
+                    value_cache,
+                    slot_mapping,
+                )
+            except Exception as _store_exc:
+                _log_once(
+                    "warning",
+                    "fallback:mlu_v1_store_kv",
+                    "vllm-nt: MLU V1 kv store failed (%s); falling back to original for full forward",
+                    _store_exc,
+                )
+                return original_fn(self, layer, query, key, value, kv_cache, attn_metadata, output, kwargs)
+
+            if common_metadata.is_prefill_only:
                 num_prefill_query_tokens = int(common_metadata.num_prefill_query_tokens)
                 num_prefill_kv_tokens = int(common_metadata.num_prefill_kv_tokens)
                 output_slice = paged_attention_prefill(
@@ -1069,14 +1237,15 @@ def _build_mlu_flash_attention_impl_forward(original: object) -> object:
                 output[:num_prefill_query_tokens].copy_(output_slice)
                 return output
 
+            # Gather kv from paged cache using MLU V1 layout-aware function.
+            k_tokens, v_tokens, cu_seqlens_k = _mlu_v1_get_kv(
+                key_cache,
+                value_cache,
+                attn_metadata.seq_lens,
+                attn_metadata.block_table,
+            )
+
             if common_metadata.is_chunked:
-                _record_hit("PagedAttentionPrefill", query[:num_actual_tokens])
-                k_tokens, v_tokens, cu_seqlens_k = get_kv_from_cache(
-                    key_cache,
-                    value_cache,
-                    attn_metadata.seq_lens,
-                    attn_metadata.block_table,
-                )
                 output_slice = paged_attention_prefill(
                     query[:num_actual_tokens],
                     k_tokens,
@@ -1090,25 +1259,31 @@ def _build_mlu_flash_attention_impl_forward(original: object) -> object:
                 output[:num_actual_tokens].copy_(output_slice)
                 return output
 
-            _record_hit("PagedAttentionDecode", query[:num_actual_tokens])
+            # Decode-only: one query token per sequence, use varlen attention
+            # over gathered kv (avoids the paged-decode layout mismatch).
             batch_size = int(attn_metadata.block_table.shape[0])
-            decode_query = query[:num_actual_tokens].view(
-                batch_size, -1, self.num_heads, self.head_size
+            cu_seqlens_q = torch.arange(
+                batch_size + 1, device=query.device, dtype=torch.int32
             )
-            decode_output = paged_attention_decode(
-                decode_query,
-                key_cache,
-                value_cache,
-                attn_metadata.seq_lens,
-                attn_metadata.block_table,
+            decode_output = paged_attention_prefill(
+                query[:num_actual_tokens],
+                k_tokens,
+                v_tokens,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                1,
                 softmax_scale=self.scale,
                 causal=True,
             )
-            output[:num_actual_tokens].copy_(
-                decode_output.reshape_as(output[:num_actual_tokens])
-            )
+            output[:num_actual_tokens].copy_(decode_output)
             return output
-        except Exception:
+        except Exception as exc:
+            _log_once(
+                "warning",
+                "fallback:mlu_flash_attn_impl_forward",
+                "vllm-nt: MLU V1 FlashAttentionImpl.forward NT path failed (%s)",
+                exc,
+            )
             return original_fn(self, layer, query, key, value, kv_cache, attn_metadata, output, kwargs)
 
     return _mark_function_patch(forward, "PagedAttentionDecode")

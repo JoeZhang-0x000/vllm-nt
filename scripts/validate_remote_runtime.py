@@ -165,6 +165,43 @@ def main() -> int:
         f"{os.environ.get('VLLM_NT_ENABLE_CUSTOM_OP_REGISTER_INTERCEPT', '0')}"
     )
 
+    _print_header("Platform Diagnostics")
+    try:
+        from vllm.platforms import current_platform
+        import vllm.envs as envs
+        is_cuda_alike = current_platform.is_cuda_alike()
+        is_cpu = current_platform.is_cpu()
+        is_oot = current_platform.is_out_of_tree()
+        use_v1 = envs.VLLM_USE_V1
+        # Mirror Attention_MluHjack.__init__ logic
+        base_use_direct_call = (not is_cuda_alike) and (not is_cpu)
+        final_use_direct_call = False if (is_oot and use_v1) else base_use_direct_call
+        print(f"platform={type(current_platform).__name__}")
+        print(f"is_cuda_alike={is_cuda_alike}")
+        print(f"is_cpu={is_cpu}")
+        print(f"is_out_of_tree={is_oot}")
+        print(f"VLLM_USE_V1={use_v1}")
+        print(f"expected_use_direct_call={final_use_direct_call}")
+        dispatch_key = getattr(current_platform, "dispatch_key", "unknown")
+        print(f"dispatch_key={dispatch_key}")
+    except Exception as exc:
+        print(f"platform diagnostics failed: {exc}")
+
+    _print_header("Custom Op Dispatch Tables")
+    try:
+        for op_fullname in (
+            "vllm::unified_attention",
+            "vllm::unified_attention_with_output",
+        ):
+            try:
+                table = torch._C._dispatch_dump_table(op_fullname)
+                print(f"--- {op_fullname} ---")
+                print(table)
+            except Exception as exc:
+                print(f"{op_fullname}: dispatch_dump_table failed: {exc}")
+    except Exception as exc:
+        print(f"dispatch table probe failed: {exc}")
+
     _print_header("Custom Op Targets")
     for qualified_name in (
         "vllm.unified_attention",
