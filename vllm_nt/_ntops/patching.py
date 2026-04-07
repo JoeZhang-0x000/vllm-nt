@@ -63,6 +63,12 @@ class _AppliedCustomOpRebind:
     library: Library
 
 
+@dataclass
+class _InstalledCustomOpIntercept:
+    original: Callable[..., object]
+    wrapped: Callable[..., object]
+
+
 def _mark_function_patch(fn: object, patch_id: str) -> object:
     try:
         setattr(fn, "_vllm_nt_patch_id", patch_id)
@@ -1111,6 +1117,7 @@ _summary_printed = False
 _registered = False
 _APPLIED_FUNCTION_PATCHES: list[_AppliedFunctionPatch] = []
 _APPLIED_CUSTOM_OP_REBINDS: list[_AppliedCustomOpRebind] = []
+_INSTALLED_CUSTOM_OP_INTERCEPT: _InstalledCustomOpIntercept | None = None
 
 
 def _try_register_oot() -> bool:
@@ -1205,6 +1212,71 @@ def _apply_function_patches() -> None:
             setattr(patch.target_obj, patch.spec.attr_name, patch.original)
         raise
     _APPLIED_FUNCTION_PATCHES = applied
+
+
+def _build_direct_register_custom_op_intercept(
+    original: Callable[..., object],
+) -> Callable[..., object]:
+    if _is_function_patch(original, "CustomOpRegisterIntercept"):
+        return cast(Callable[..., object], original)
+
+    def wrapped(
+        op_name: str,
+        op_func: Callable[..., object],
+        mutates_args: list[str] | None = None,
+        fake_impl: Callable[..., object] | None = None,
+        target_lib: Library | None = None,
+        dispatch_key: str | None = None,
+        tags: tuple[torch.Tag, ...] = (),
+    ):
+        replacement = op_func
+        if op_name == "unified_kv_cache_update":
+            replacement = _build_custom_op_unified_kv_cache_update()
+        elif op_name == "unified_attention_with_output":
+            replacement = _build_custom_op_unified_attention_with_output()
+            _OPERATOR_STATS["PagedAttentionPrefill"].registered_via = (
+                "custom_op_intercept"
+            )
+            _OPERATOR_STATS["PagedAttentionDecode"].registered_via = (
+                "custom_op_intercept"
+            )
+            logger.info(
+                "vllm-nt: intercepting custom op registration for %s", op_name
+            )
+        return original(
+            op_name,
+            replacement,
+            mutates_args=mutates_args,
+            fake_impl=fake_impl,
+            target_lib=target_lib,
+            dispatch_key=dispatch_key,
+            tags=tags,
+        )
+
+    return cast(Callable[..., object], _mark_function_patch(wrapped, "CustomOpRegisterIntercept"))
+
+
+def _install_custom_op_register_intercept() -> None:
+    global _INSTALLED_CUSTOM_OP_INTERCEPT
+    if os.environ.get("VLLM_NT_ENABLE_CUSTOM_OP_REGISTER_INTERCEPT") != "1":
+        return
+    if _INSTALLED_CUSTOM_OP_INTERCEPT is not None:
+        return
+
+    try:
+        torch_utils = importlib.import_module("vllm.utils.torch_utils")
+        original = cast(Callable[..., object], torch_utils.direct_register_custom_op)
+        wrapped = _build_direct_register_custom_op_intercept(original)
+        torch_utils.direct_register_custom_op = wrapped
+        _INSTALLED_CUSTOM_OP_INTERCEPT = _InstalledCustomOpIntercept(
+            original=original, wrapped=wrapped
+        )
+        if "vllm.model_executor.layers.attention.attention" in sys.modules:
+            logger.warning(
+                "vllm-nt: custom op register intercept installed after attention module import; it may be too late for unified_attention_with_output"
+            )
+    except Exception as exc:
+        logger.warning("vllm-nt: custom op register intercept skipped (%s)", exc)
 
 
 def _rebind_custom_op(
@@ -1321,6 +1393,7 @@ def ensure_registered() -> None:
     if _registered:
         return
     _registered = True
+    _install_custom_op_register_intercept()
     if not _try_register_oot():
         _monkey_patch()
     _patch_leaf_methods()

@@ -160,6 +160,10 @@ def main() -> int:
         "custom_op_rebind="
         f"{os.environ.get('VLLM_NT_ENABLE_CUSTOM_OP_REBIND', '0')}"
     )
+    print(
+        "custom_op_register_intercept="
+        f"{os.environ.get('VLLM_NT_ENABLE_CUSTOM_OP_REGISTER_INTERCEPT', '0')}"
+    )
 
     _print_header("Custom Op Targets")
     for qualified_name in (

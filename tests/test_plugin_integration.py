@@ -344,6 +344,62 @@ class TestPluginRegistration:
             == "custom_op_rebind"
         )
 
+    def test_custom_op_register_intercept_swaps_registration_target(
+        self, monkeypatch
+    ):
+        _require_runtime()
+        import vllm_nt._ntops.patching as patching
+
+        calls: list[tuple[str, object]] = []
+
+        fake_torch_utils = ModuleType("vllm.utils.torch_utils")
+
+        def fake_direct_register_custom_op(
+            op_name,
+            op_func,
+            mutates_args=None,
+            fake_impl=None,
+            target_lib=None,
+            dispatch_key=None,
+            tags=(),
+        ):
+            calls.append((op_name, op_func))
+
+        fake_torch_utils.direct_register_custom_op = fake_direct_register_custom_op
+        monkeypatch.setitem(sys.modules, "vllm.utils.torch_utils", fake_torch_utils)
+        monkeypatch.setenv("VLLM_NT_ENABLE_CUSTOM_OP_REGISTER_INTERCEPT", "1")
+        monkeypatch.setattr(patching, "_INSTALLED_CUSTOM_OP_INTERCEPT", None)
+        monkeypatch.setitem(
+            patching._OPERATOR_STATS,
+            "PagedAttentionPrefill",
+            patching.OperatorStats(),
+        )
+        monkeypatch.setitem(
+            patching._OPERATOR_STATS,
+            "PagedAttentionDecode",
+            patching.OperatorStats(),
+        )
+
+        patching._install_custom_op_register_intercept()
+
+        assert fake_torch_utils.direct_register_custom_op is not fake_direct_register_custom_op
+        fake_torch_utils.direct_register_custom_op(
+            "unified_attention_with_output",
+            lambda *args, **kwargs: None,
+        )
+
+        assert calls
+        assert calls[0][0] == "unified_attention_with_output"
+        assert calls[0][1] is not None
+        assert (
+            patching._OPERATOR_STATS["PagedAttentionPrefill"].registered_via
+            == "custom_op_intercept"
+        )
+        assert (
+            patching._OPERATOR_STATS["PagedAttentionDecode"].registered_via
+            == "custom_op_intercept"
+        )
+
     def test_gelu_and_mul_forward_uses_nt_tanh_path(self, monkeypatch):
         _require_runtime()
         import torch
