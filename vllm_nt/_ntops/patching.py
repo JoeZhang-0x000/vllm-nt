@@ -1,5 +1,6 @@
 import atexit
 import importlib
+import inspect
 import logging
 import os
 import sys
@@ -246,6 +247,57 @@ def _extract_kv_cache_tensors(kv_cache: object) -> tuple[torch.Tensor, torch.Ten
         ):
             return kv_cache[0], kv_cache[1]
     return None
+
+
+def _call_attention_forward_compat(
+    original_fn: Callable[..., object],
+    self,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    output_shape: torch.Size | None,
+    kwargs: dict[str, Any] | None,
+):
+    try:
+        params = inspect.signature(original_fn).parameters
+    except (TypeError, ValueError):
+        params = {}
+
+    if params:
+        call_kwargs: dict[str, object] = {}
+        if "output_shape" in params:
+            call_kwargs["output_shape"] = output_shape
+        if "kwargs" in params:
+            call_kwargs["kwargs"] = kwargs
+        return original_fn(self, query, key, value, **call_kwargs)
+
+    attempts: list[Callable[[], object]] = []
+    if output_shape is not None and kwargs is not None:
+        attempts.append(
+            lambda: original_fn(
+                self, query, key, value, output_shape=output_shape, kwargs=kwargs
+            )
+        )
+    if output_shape is not None:
+        attempts.append(
+            lambda: original_fn(self, query, key, value, output_shape=output_shape)
+        )
+        attempts.append(lambda: original_fn(self, query, key, value, output_shape))
+    if kwargs is not None:
+        attempts.append(lambda: original_fn(self, query, key, value, kwargs=kwargs))
+        attempts.append(lambda: original_fn(self, query, key, value, kwargs))
+    attempts.append(lambda: original_fn(self, query, key, value))
+
+    last_exc: Exception | None = None
+    for attempt in attempts:
+        try:
+            return attempt()
+        except TypeError as exc:
+            last_exc = exc
+
+    if last_exc is not None:
+        raise last_exc
+    return original_fn(self, query, key, value)
 
 
 def _build_unified_kv_cache_update(original: object) -> object:
@@ -585,7 +637,9 @@ def _build_mlu_attention_forward(original: object) -> object:
                 not getattr(self, "use_output", False)
                 or getattr(self, "use_direct_call", False)
             ):
-                return original_fn(self, query, key, value, output_shape=output_shape, kwargs=kwargs)
+                return _call_attention_forward_compat(
+                    original_fn, self, query, key, value, output_shape, kwargs
+                )
 
             layer_mod = importlib.import_module("vllm_mlu.attention.layer")
             output_lse = None
@@ -628,7 +682,9 @@ def _build_mlu_attention_forward(original: object) -> object:
                 return output.view(-1, hidden_size), output_lse
             return output.view(-1, hidden_size)
         except Exception:
-            return original_fn(self, query, key, value, output_shape=output_shape, kwargs=kwargs)
+            return _call_attention_forward_compat(
+                original_fn, self, query, key, value, output_shape, kwargs
+            )
 
     return _mark_function_patch(forward, "UnifiedAttentionWithOutput")
 
