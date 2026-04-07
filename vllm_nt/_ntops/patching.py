@@ -100,6 +100,16 @@ def _set_registered_via(name: str, value: str) -> None:
         stats.registered_via = value
 
 
+_ONCE_LOGGED_KEYS: set[str] = set()
+
+
+def _log_once(level: str, key: str, msg: str, *args: object) -> None:
+    if key in _ONCE_LOGGED_KEYS:
+        return
+    _ONCE_LOGGED_KEYS.add(key)
+    getattr(logger, level)(msg, *args)
+
+
 def _record_hit(name: str, x: torch.Tensor) -> None:
     stats = _OPERATOR_STATS[name]
     stats.hits += 1
@@ -501,6 +511,11 @@ def _build_mlu_unified_attention_with_output(original: object) -> object:
         kwargs: dict[str, Any] | None = None,
     ) -> torch.Tensor:
         try:
+            _log_once(
+                "info",
+                "enter:mlu_unified_attention_with_output",
+                "vllm-nt: entered mlu unified_attention_with_output wrapper",
+            )
             layer_mod = importlib.import_module("vllm_mlu.attention.layer")
             layer_mod.wait_for_kv_layer_from_connector(layer_name)
             forward_context = layer_mod.get_forward_context()
@@ -648,7 +663,13 @@ def _build_mlu_unified_attention_with_output(original: object) -> object:
 
             layer_mod.maybe_save_kv_layer_to_connector(layer_name, kv_cache)
             return output
-        except Exception:
+        except Exception as exc:
+            _log_once(
+                "warning",
+                "fallback:mlu_unified_attention_with_output",
+                "vllm-nt: fallback in mlu unified_attention_with_output wrapper (%s)",
+                exc,
+            )
             return original_fn(query, key, value, output, layer_name, kwargs=kwargs)
 
     return _mark_function_patch(unified_attention_with_output, "UnifiedAttentionWithOutput")
@@ -661,6 +682,11 @@ def _build_custom_op_unified_kv_cache_update() -> Callable[..., torch.Tensor]:
         layer_name: str,
     ) -> torch.Tensor:
         try:
+            _log_once(
+                "info",
+                "enter:custom_op_unified_kv_cache_update",
+                "vllm-nt: entered custom op unified_kv_cache_update wrapper",
+            )
             layer_mod = importlib.import_module("vllm_mlu.attention.layer")
             layer_mod.wait_for_kv_layer_from_connector(layer_name)
             forward_context = layer_mod.get_forward_context()
@@ -681,7 +707,13 @@ def _build_custom_op_unified_kv_cache_update() -> Callable[..., torch.Tensor]:
                 attn_metadata.slot_mapping.flatten(),
             )
             return torch.empty(0, device=key_cache.device, dtype=key_cache.dtype)
-        except Exception:
+        except Exception as exc:
+            _log_once(
+                "warning",
+                "fallback:custom_op_unified_kv_cache_update",
+                "vllm-nt: fallback in custom op unified_kv_cache_update wrapper (%s)",
+                exc,
+            )
             return torch.empty(0, device=key.device, dtype=key.dtype)
 
     return _mark_function_patch(unified_kv_cache_update, "StoreKVCache")
@@ -699,6 +731,11 @@ def _build_custom_op_unified_attention_with_output() -> Callable[..., None]:
         kv_cache_dummy_dep: torch.Tensor | None = None,
     ) -> None:
         del output_scale, output_block_scale, kv_cache_dummy_dep
+        _log_once(
+            "info",
+            "enter:custom_op_unified_attention_with_output",
+            "vllm-nt: entered custom op unified_attention_with_output wrapper",
+        )
         layer_mod = importlib.import_module("vllm_mlu.attention.layer")
         layer_mod.unified_attention_with_output(
             query,
@@ -719,6 +756,11 @@ def _build_custom_op_unified_attention() -> Callable[..., torch.Tensor]:
         value: torch.Tensor,
         layer_name: str,
     ) -> torch.Tensor:
+        _log_once(
+            "info",
+            "enter:custom_op_unified_attention",
+            "vllm-nt: entered custom op unified_attention wrapper",
+        )
         layer_mod = importlib.import_module("vllm_mlu.attention.layer")
         layer_mod.wait_for_kv_layer_from_connector(layer_name)
         forward_context = layer_mod.get_forward_context()
@@ -730,6 +772,11 @@ def _build_custom_op_unified_attention() -> Callable[..., torch.Tensor]:
         caches = _extract_kv_cache_tensors(kv_cache)
 
         if caches is None:
+            _log_once(
+                "warning",
+                "fallback:custom_op_unified_attention:no_cache",
+                "vllm-nt: custom op unified_attention falling back to impl.forward because kv cache tensors are unavailable",
+            )
             return self.impl.forward(
                 self,
                 query,
@@ -754,6 +801,11 @@ def _build_custom_op_unified_attention() -> Callable[..., torch.Tensor]:
             or query_start_loc is None
             or max_query_len is None
         ):
+            _log_once(
+                "warning",
+                "fallback:custom_op_unified_attention:metadata",
+                "vllm-nt: custom op unified_attention falling back to impl.forward because metadata is incomplete",
+            )
             return self.impl.forward(
                 self,
                 query,
