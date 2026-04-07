@@ -815,6 +815,8 @@ def _build_custom_op_unified_attention_with_output() -> Callable[..., None]:
         kv_cache_dummy_dep: torch.Tensor | None = None,
     ) -> None:
         del output_scale, output_block_scale, kv_cache_dummy_dep
+        # Record hit at entry — proves the custom op dispatch reaches our code.
+        _record_hit("PagedAttentionPrefill", query)
         _log_once(
             "info",
             "enter:custom_op_unified_attention_with_output",
