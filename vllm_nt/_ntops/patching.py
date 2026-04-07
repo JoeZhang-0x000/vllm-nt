@@ -81,6 +81,25 @@ def _is_function_patch(fn: object, patch_id: str) -> bool:
     return getattr(fn, "_vllm_nt_patch_id", None) == patch_id
 
 
+_REGISTERED_VIA_PRIORITY = {
+    None: 0,
+    "oot": 1,
+    "monkey_patch": 2,
+    "function_patch": 3,
+    "custom_op_rebind": 4,
+    "custom_op_intercept": 5,
+}
+
+
+def _set_registered_via(name: str, value: str) -> None:
+    stats = _OPERATOR_STATS[name]
+    current = stats.registered_via
+    if _REGISTERED_VIA_PRIORITY.get(value, 0) >= _REGISTERED_VIA_PRIORITY.get(
+        current, 0
+    ):
+        stats.registered_via = value
+
+
 def _record_hit(name: str, x: torch.Tensor) -> None:
     stats = _OPERATOR_STATS[name]
     stats.hits += 1
@@ -1210,7 +1229,7 @@ def _try_register_oot() -> bool:
             cls.register_oot(name=name)(
                 type(f"NT{name}", (cls,), {"forward_oot": forward})
             )
-            _OPERATOR_STATS[name].registered_via = "oot"
+            _set_registered_via(name, "oot")
         logger.info(
             "vllm-nt: OOT registration succeeded for %s", ", ".join(_OPERATOR_SPECS)
         )
@@ -1224,7 +1243,7 @@ def _monkey_patch() -> None:
     for name, (cls, forward) in _OPERATOR_SPECS.items():
         cls.forward_oot = forward
         cls.forward_native = forward
-        _OPERATOR_STATS[name].registered_via = "monkey_patch"
+        _set_registered_via(name, "monkey_patch")
     logger.info("vllm-nt: monkey-patched %s", ", ".join(_OPERATOR_SPECS))
 
 
@@ -1252,9 +1271,9 @@ def _nt_unquantized_embedding(
 
 def _patch_leaf_methods() -> None:
     UnquantizedLinearMethod.apply = _nt_unquantized_linear_apply
-    _OPERATOR_STATS["MatMul"].registered_via = "monkey_patch"
+    _set_registered_via("MatMul", "monkey_patch")
     UnquantizedEmbeddingMethod.embedding = _nt_unquantized_embedding
-    _OPERATOR_STATS["Embedding"].registered_via = "monkey_patch"
+    _set_registered_via("Embedding", "monkey_patch")
 
 
 def _resolve_function_patch_target(spec: FunctionPatchSpec) -> tuple[object, object]:
@@ -1279,14 +1298,10 @@ def _apply_function_patches() -> None:
                     )
                 )
                 if spec.patch_id in {"UnifiedAttention2D", "UnifiedAttentionWithOutput"}:
-                    _OPERATOR_STATS["PagedAttentionPrefill"].registered_via = (
-                        "function_patch"
-                    )
-                    _OPERATOR_STATS["PagedAttentionDecode"].registered_via = (
-                        "function_patch"
-                    )
+                    _set_registered_via("PagedAttentionPrefill", "function_patch")
+                    _set_registered_via("PagedAttentionDecode", "function_patch")
                 elif spec.patch_id in _OPERATOR_STATS:
-                    _OPERATOR_STATS[spec.patch_id].registered_via = "function_patch"
+                    _set_registered_via(spec.patch_id, "function_patch")
             except Exception as exc:
                 if spec.required:
                     raise
@@ -1318,23 +1333,15 @@ def _build_direct_register_custom_op_intercept(
             replacement = _build_custom_op_unified_kv_cache_update()
         elif op_name == "unified_attention":
             replacement = _build_custom_op_unified_attention()
-            _OPERATOR_STATS["PagedAttentionPrefill"].registered_via = (
-                "custom_op_intercept"
-            )
-            _OPERATOR_STATS["PagedAttentionDecode"].registered_via = (
-                "custom_op_intercept"
-            )
+            _set_registered_via("PagedAttentionPrefill", "custom_op_intercept")
+            _set_registered_via("PagedAttentionDecode", "custom_op_intercept")
             logger.info(
                 "vllm-nt: intercepting custom op registration for %s", op_name
             )
         elif op_name == "unified_attention_with_output":
             replacement = _build_custom_op_unified_attention_with_output()
-            _OPERATOR_STATS["PagedAttentionPrefill"].registered_via = (
-                "custom_op_intercept"
-            )
-            _OPERATOR_STATS["PagedAttentionDecode"].registered_via = (
-                "custom_op_intercept"
-            )
+            _set_registered_via("PagedAttentionPrefill", "custom_op_intercept")
+            _set_registered_via("PagedAttentionDecode", "custom_op_intercept")
             logger.info(
                 "vllm-nt: intercepting custom op registration for %s", op_name
             )
@@ -1408,8 +1415,8 @@ def _apply_custom_op_rebindings() -> None:
                 dispatch_key,
             )
         )
-        _OPERATOR_STATS["PagedAttentionPrefill"].registered_via = "custom_op_rebind"
-        _OPERATOR_STATS["PagedAttentionDecode"].registered_via = "custom_op_rebind"
+        _set_registered_via("PagedAttentionPrefill", "custom_op_rebind")
+        _set_registered_via("PagedAttentionDecode", "custom_op_rebind")
         logger.info(
             "vllm-nt: rebound custom ops for dispatch key %s: %s",
             dispatch_key,
