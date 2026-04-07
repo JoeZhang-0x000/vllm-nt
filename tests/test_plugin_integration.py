@@ -294,6 +294,56 @@ class TestPluginRegistration:
         assert child.F.scaled_dot_product_attention(1, flag=True)[0] == "patched"
         assert patching._OPERATOR_STATS["SDPA"].registered_via == "function_patch"
 
+    def test_custom_op_rebinding_is_gated_and_updates_stats(self, monkeypatch):
+        _require_runtime()
+        import vllm_nt._ntops.patching as patching
+
+        calls: list[tuple[str, str]] = []
+
+        class _Platform:
+            dispatch_key = "MLU"
+
+        monkeypatch.setenv("VLLM_NT_ENABLE_CUSTOM_OP_REBIND", "1")
+        monkeypatch.setattr(
+            patching,
+            "_APPLIED_CUSTOM_OP_REBINDS",
+            [],
+        )
+        monkeypatch.setattr(
+            patching,
+            "_rebind_custom_op",
+            lambda op_name, op_func, dispatch_key: (
+                calls.append((op_name, dispatch_key))
+                or patching._AppliedCustomOpRebind(op_name, dispatch_key, object())
+            ),
+        )
+        monkeypatch.setattr("vllm.platforms.current_platform", _Platform())
+        monkeypatch.setitem(
+            patching._OPERATOR_STATS,
+            "PagedAttentionPrefill",
+            patching.OperatorStats(),
+        )
+        monkeypatch.setitem(
+            patching._OPERATOR_STATS,
+            "PagedAttentionDecode",
+            patching.OperatorStats(),
+        )
+
+        patching._apply_custom_op_rebindings()
+
+        assert calls == [
+            ("unified_kv_cache_update", "MLU"),
+            ("unified_attention_with_output", "MLU"),
+        ]
+        assert (
+            patching._OPERATOR_STATS["PagedAttentionPrefill"].registered_via
+            == "custom_op_rebind"
+        )
+        assert (
+            patching._OPERATOR_STATS["PagedAttentionDecode"].registered_via
+            == "custom_op_rebind"
+        )
+
     def test_gelu_and_mul_forward_uses_nt_tanh_path(self, monkeypatch):
         _require_runtime()
         import torch

@@ -9,6 +9,7 @@ from typing import Any, Callable, cast
 
 import torch
 import torch.nn.functional as F
+from torch.library import Library
 from vllm.model_executor.layers import activation, layernorm
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -53,6 +54,13 @@ class _AppliedFunctionPatch:
     spec: FunctionPatchSpec
     target_obj: object
     original: object
+
+
+@dataclass
+class _AppliedCustomOpRebind:
+    op_name: str
+    dispatch_key: str
+    library: Library
 
 
 def _mark_function_patch(fn: object, patch_id: str) -> object:
@@ -621,6 +629,64 @@ def _build_mlu_unified_attention_with_output(original: object) -> object:
     return _mark_function_patch(unified_attention_with_output, "UnifiedAttentionWithOutput")
 
 
+def _build_custom_op_unified_kv_cache_update() -> Callable[..., torch.Tensor]:
+    def unified_kv_cache_update(
+        key: torch.Tensor,
+        value: torch.Tensor,
+        layer_name: str,
+    ) -> torch.Tensor:
+        try:
+            layer_mod = importlib.import_module("vllm_mlu.attention.layer")
+            layer_mod.wait_for_kv_layer_from_connector(layer_name)
+            forward_context = layer_mod.get_forward_context()
+            attn_metadata = forward_context.attn_metadata
+            if isinstance(attn_metadata, dict):
+                attn_metadata = attn_metadata[layer_name]
+            self = forward_context.no_compile_layers[layer_name]
+            kv_cache = self.kv_cache[forward_context.virtual_engine]
+            caches = _extract_kv_cache_tensors(kv_cache)
+            if caches is None or getattr(attn_metadata, "slot_mapping", None) is None:
+                return torch.empty(0, device=key.device, dtype=key.dtype)
+            key_cache, value_cache = caches
+            store_kv_cache(
+                key,
+                value,
+                key_cache,
+                value_cache,
+                attn_metadata.slot_mapping.flatten(),
+            )
+            return torch.empty(0, device=key_cache.device, dtype=key_cache.dtype)
+        except Exception:
+            return torch.empty(0, device=key.device, dtype=key.dtype)
+
+    return _mark_function_patch(unified_kv_cache_update, "StoreKVCache")
+
+
+def _build_custom_op_unified_attention_with_output() -> Callable[..., None]:
+    def unified_attention_with_output(
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        output: torch.Tensor,
+        layer_name: str,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
+        kv_cache_dummy_dep: torch.Tensor | None = None,
+    ) -> None:
+        del output_scale, output_block_scale, kv_cache_dummy_dep
+        layer_mod = importlib.import_module("vllm_mlu.attention.layer")
+        layer_mod.unified_attention_with_output(
+            query,
+            key,
+            value,
+            output,
+            layer_name,
+            kwargs={},
+        )
+
+    return _mark_function_patch(unified_attention_with_output, "UnifiedAttentionWithOutput")
+
+
 def _build_mlu_attention_forward(original: object) -> object:
     original_fn = cast(Callable[..., object], original)
 
@@ -1044,6 +1110,7 @@ else:
 _summary_printed = False
 _registered = False
 _APPLIED_FUNCTION_PATCHES: list[_AppliedFunctionPatch] = []
+_APPLIED_CUSTOM_OP_REBINDS: list[_AppliedCustomOpRebind] = []
 
 
 def _try_register_oot() -> bool:
@@ -1140,6 +1207,54 @@ def _apply_function_patches() -> None:
     _APPLIED_FUNCTION_PATCHES = applied
 
 
+def _rebind_custom_op(
+    op_name: str,
+    op_func: Callable[..., object],
+    dispatch_key: str,
+) -> _AppliedCustomOpRebind:
+    lib = Library("vllm", "IMPL")
+    lib.impl(op_name, op_func, dispatch_key=dispatch_key)
+    return _AppliedCustomOpRebind(op_name=op_name, dispatch_key=dispatch_key, library=lib)
+
+
+def _apply_custom_op_rebindings() -> None:
+    global _APPLIED_CUSTOM_OP_REBINDS
+    if os.environ.get("VLLM_NT_ENABLE_CUSTOM_OP_REBIND") != "1":
+        return
+
+    applied: list[_AppliedCustomOpRebind] = []
+    try:
+        from vllm.platforms import current_platform
+
+        dispatch_key = current_platform.dispatch_key
+        applied.append(
+            _rebind_custom_op(
+                "unified_kv_cache_update",
+                _build_custom_op_unified_kv_cache_update(),
+                dispatch_key,
+            )
+        )
+        applied.append(
+            _rebind_custom_op(
+                "unified_attention_with_output",
+                _build_custom_op_unified_attention_with_output(),
+                dispatch_key,
+            )
+        )
+        _OPERATOR_STATS["PagedAttentionPrefill"].registered_via = "custom_op_rebind"
+        _OPERATOR_STATS["PagedAttentionDecode"].registered_via = "custom_op_rebind"
+        logger.info(
+            "vllm-nt: rebound custom ops for dispatch key %s: %s",
+            dispatch_key,
+            ", ".join(rebind.op_name for rebind in applied),
+        )
+    except Exception as exc:
+        logger.warning("vllm-nt: custom op rebinding skipped (%s)", exc)
+        return
+
+    _APPLIED_CUSTOM_OP_REBINDS = applied
+
+
 def get_usage_summary() -> dict[str, object]:
     operators = {
         name: {"hits": stats.hits, "registered_via": stats.registered_via}
@@ -1210,3 +1325,4 @@ def ensure_registered() -> None:
         _monkey_patch()
     _patch_leaf_methods()
     _apply_function_patches()
+    _apply_custom_op_rebindings()

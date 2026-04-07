@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import os
 import platform
 import sys
 from dataclasses import asdict, dataclass
@@ -75,6 +76,28 @@ def _print_header(title: str) -> None:
     print(f"\n=== {title} ===")
 
 
+def _probe_custom_op(qualified_name: str) -> dict[str, object]:
+    try:
+        namespace, op_name = qualified_name.split(".", 1)
+        namespace_obj = getattr(__import__("torch").ops, namespace)
+        exists = hasattr(namespace_obj, op_name)
+        overload = getattr(namespace_obj, op_name, None)
+        has_default = hasattr(overload, "default") if overload is not None else False
+        return {
+            "qualified_name": qualified_name,
+            "exists": exists,
+            "has_default": has_default,
+            "detail": type(overload).__name__ if overload is not None else "missing",
+        }
+    except Exception as exc:
+        return {
+            "qualified_name": qualified_name,
+            "exists": False,
+            "has_default": False,
+            "detail": f"probe failed: {exc}",
+        }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate vllm-nt on a remote runtime")
     parser.add_argument("--model", required=True, help="Model path or model id")
@@ -129,6 +152,21 @@ def main() -> int:
     print(f"cuda_available={torch.cuda.is_available()}")
     if hasattr(torch, "mlu"):
         print(f"mlu_available={torch.mlu.is_available()}")
+    print(
+        "experimental_forward_patch="
+        f"{os.environ.get('VLLM_NT_ENABLE_EXPERIMENTAL_FORWARD_PATCH', '0')}"
+    )
+    print(
+        "custom_op_rebind="
+        f"{os.environ.get('VLLM_NT_ENABLE_CUSTOM_OP_REBIND', '0')}"
+    )
+
+    _print_header("Custom Op Targets")
+    for qualified_name in (
+        "vllm.unified_kv_cache_update",
+        "vllm.unified_attention_with_output",
+    ):
+        print(json.dumps(_probe_custom_op(qualified_name), ensure_ascii=True))
 
     _print_header("Function Patch Targets")
     seen: set[tuple[str, str | None, str]] = set()
