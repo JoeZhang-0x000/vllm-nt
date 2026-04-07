@@ -1157,6 +1157,8 @@ def _build_mlu_flash_attention_impl_forward(original: object) -> object:
         output: torch.Tensor | None = None,
         kwargs: dict[str, Any] | None = None,
     ) -> torch.Tensor:
+        # Record hit at entry — proves the FlashAttentionImpl.forward patch is reached.
+        _record_hit("PagedAttentionDecode", query)
         if output is None or attn_metadata is None:
             return original_fn(self, layer, query, key, value, kv_cache, attn_metadata, output, kwargs)
 
