@@ -854,7 +854,7 @@ _OPERATOR_STATS = {name: OperatorStats() for name in _OPERATOR_SPECS} | {
     "RoPE": OperatorStats(),
     "SDPA": OperatorStats(),
 }
-_FUNCTION_PATCH_SPECS: tuple[FunctionPatchSpec, ...] = (
+_FUNCTION_PATCH_SPECS_BASE: tuple[FunctionPatchSpec, ...] = (
     FunctionPatchSpec(
         patch_id="StoreKVCache",
         module_path="vllm.model_executor.layers.attention.attention",
@@ -875,22 +875,6 @@ _FUNCTION_PATCH_SPECS: tuple[FunctionPatchSpec, ...] = (
         attr_name="unified_attention_with_output",
         required=False,
         builder=_build_mlu_unified_attention_with_output,
-    ),
-    FunctionPatchSpec(
-        patch_id="UnifiedAttentionWithOutput",
-        module_path="vllm.attention.layer",
-        object_name="Attention",
-        attr_name="forward",
-        required=False,
-        builder=_build_mlu_attention_forward,
-    ),
-    FunctionPatchSpec(
-        patch_id="UnifiedAttentionWithOutput",
-        module_path="vllm_mlu.attention.layer",
-        object_name="Attention_MluHjack",
-        attr_name="forward",
-        required=False,
-        builder=_build_mlu_attention_forward,
     ),
     FunctionPatchSpec(
         patch_id="PagedAttentionPrefill",
@@ -975,6 +959,32 @@ _FUNCTION_PATCH_SPECS: tuple[FunctionPatchSpec, ...] = (
         builder=_build_mlu_flash_attention_impl_forward,
     ),
 )
+
+_EXPERIMENTAL_FORWARD_PATCH_SPECS: tuple[FunctionPatchSpec, ...] = (
+    FunctionPatchSpec(
+        patch_id="UnifiedAttentionWithOutput",
+        module_path="vllm.attention.layer",
+        object_name="Attention",
+        attr_name="forward",
+        required=False,
+        builder=_build_mlu_attention_forward,
+    ),
+    FunctionPatchSpec(
+        patch_id="UnifiedAttentionWithOutput",
+        module_path="vllm_mlu.attention.layer",
+        object_name="Attention_MluHjack",
+        attr_name="forward",
+        required=False,
+        builder=_build_mlu_attention_forward,
+    ),
+)
+
+if os.environ.get("VLLM_NT_ENABLE_EXPERIMENTAL_FORWARD_PATCH") == "1":
+    _FUNCTION_PATCH_SPECS = (
+        _FUNCTION_PATCH_SPECS_BASE + _EXPERIMENTAL_FORWARD_PATCH_SPECS
+    )
+else:
+    _FUNCTION_PATCH_SPECS = _FUNCTION_PATCH_SPECS_BASE
 _summary_printed = False
 _registered = False
 _APPLIED_FUNCTION_PATCHES: list[_AppliedFunctionPatch] = []
