@@ -404,6 +404,171 @@ def _build_unified_attention_with_output(original: object) -> object:
     return _mark_function_patch(unified_attention_with_output, "UnifiedAttentionWithOutput")
 
 
+def _build_mlu_unified_attention_with_output(original: object) -> object:
+    original_fn = cast(Callable[..., object], original)
+
+    def unified_attention_with_output(
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        output: torch.Tensor,
+        layer_name: str,
+        kwargs: dict[str, Any] | None = None,
+    ) -> torch.Tensor:
+        try:
+            layer_mod = importlib.import_module("vllm_mlu.attention.layer")
+            layer_mod.wait_for_kv_layer_from_connector(layer_name)
+            forward_context = layer_mod.get_forward_context()
+            attn_metadata = forward_context.attn_metadata
+            if isinstance(attn_metadata, dict):
+                attn_metadata = attn_metadata[layer_name]
+            self = forward_context.no_compile_layers[layer_name]
+            kv_cache = self.kv_cache[forward_context.virtual_engine]
+            caches = _extract_kv_cache_tensors(kv_cache)
+            if caches is None:
+                return original_fn(query, key, value, output, layer_name, kwargs=kwargs)
+
+            key_cache, value_cache = caches
+            scale = getattr(self.impl, "scale", 1 / (query.shape[-1] ** 0.5))
+
+            if (
+                isinstance(key, torch.Tensor)
+                and isinstance(value, torch.Tensor)
+                and key.numel() > 0
+                and value.numel() > 0
+                and getattr(attn_metadata, "slot_mapping", None) is not None
+            ):
+                store_kv_cache(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    attn_metadata.slot_mapping.flatten(),
+                )
+
+            prefill_meta = getattr(attn_metadata, "prefill_metadata", None)
+            decode_meta = getattr(attn_metadata, "decode_metadata", None)
+
+            num_prefill_query_tokens = 0
+            num_prefill_kv_tokens = 0
+            if prefill_meta is not None:
+                if getattr(prefill_meta, "query_start_loc", None) is not None:
+                    q_start = prefill_meta.query_start_loc
+                    num_prefill_query_tokens = int(q_start[-1].item())
+                if getattr(prefill_meta, "seq_start_loc", None) is not None:
+                    kv_start = prefill_meta.seq_start_loc
+                    num_prefill_kv_tokens = int(kv_start[-1].item())
+
+            if prefill_meta is not None and num_prefill_query_tokens > 0:
+                _record_hit("PagedAttentionPrefill", query[:num_prefill_query_tokens])
+                prefill_query = query[:num_prefill_query_tokens]
+                block_tables = getattr(prefill_meta, "block_tables", None)
+                if (
+                    block_tables is None
+                    or block_tables.numel() == 0
+                    or key_cache.numel() == 0
+                ):
+                    prefill_key = key[:num_prefill_kv_tokens]
+                    prefill_value = value[:num_prefill_kv_tokens]
+                    prefill_out = paged_attention_prefill(
+                        prefill_query,
+                        prefill_key,
+                        prefill_value,
+                        prefill_meta.query_start_loc,
+                        prefill_meta.seq_start_loc,
+                        int(prefill_meta.max_query_len),
+                        softmax_scale=scale,
+                        causal=True,
+                    )
+                else:
+                    seq_lens = torch.as_tensor(
+                        prefill_meta.seq_lens,
+                        device=query.device,
+                        dtype=torch.int32,
+                    )
+                    k_tokens, v_tokens, cu_seqlens_k = get_kv_from_cache(
+                        key_cache,
+                        value_cache,
+                        seq_lens,
+                        block_tables,
+                    )
+                    prefill_out = paged_attention_prefill(
+                        prefill_query,
+                        k_tokens,
+                        v_tokens,
+                        prefill_meta.query_start_loc,
+                        cu_seqlens_k,
+                        int(prefill_meta.max_query_len),
+                        softmax_scale=scale,
+                        causal=True,
+                    )
+                output[:num_prefill_query_tokens].copy_(prefill_out)
+
+            if decode_meta is not None and decode_meta.max_decode_query_len is not None:
+                decode_query = query[num_prefill_query_tokens:]
+                if decode_query.numel() > 0:
+                    _record_hit("PagedAttentionDecode", decode_query)
+                    if int(decode_meta.max_decode_query_len) > 1:
+                        decode_seq_lens = torch.as_tensor(
+                            decode_meta.seq_lens_tensor,
+                            device=query.device,
+                            dtype=torch.int32,
+                        )
+                        k_tokens, v_tokens, cu_seqlens_k = get_kv_from_cache(
+                            key_cache,
+                            value_cache,
+                            decode_seq_lens,
+                            decode_meta.block_tables,
+                        )
+                        decode_out = paged_attention_prefill(
+                            decode_query,
+                            k_tokens,
+                            v_tokens,
+                            decode_meta.query_start_loc,
+                            cu_seqlens_k,
+                            int(decode_meta.max_decode_query_len),
+                            softmax_scale=scale,
+                            causal=True,
+                        )
+                        output[num_prefill_query_tokens:].copy_(decode_out)
+                    else:
+                        batch_size = int(decode_meta.block_tables.shape[0])
+                        decode_query_view = decode_query.view(
+                            batch_size, -1, query.shape[1], query.shape[2]
+                        )
+                        (
+                            seq_lens_arg,
+                            _max_context_len,
+                            block_tables_arg,
+                        ) = importlib.import_module(
+                            "vllm_mlu.attention.backends.flash_attn"
+                        ).get_seq_len_block_table_args(
+                            decode_meta, False, self.impl.attn_type
+                        )
+                        decode_seq_lens = torch.as_tensor(
+                            seq_lens_arg, device=query.device, dtype=torch.int32
+                        )
+                        decode_out = paged_attention_decode(
+                            decode_query_view,
+                            key_cache,
+                            value_cache,
+                            decode_seq_lens,
+                            block_tables_arg,
+                            softmax_scale=scale,
+                            causal=True,
+                        )
+                        output[num_prefill_query_tokens:].copy_(
+                            decode_out.reshape_as(output[num_prefill_query_tokens:])
+                        )
+
+            layer_mod.maybe_save_kv_layer_to_connector(layer_name, kv_cache)
+            return output
+        except Exception:
+            return original_fn(query, key, value, output, layer_name, kwargs=kwargs)
+
+    return _mark_function_patch(unified_attention_with_output, "UnifiedAttentionWithOutput")
+
+
 def _build_flash_attn_varlen_patch(original: object) -> object:
     if _is_function_patch(original, "PagedAttentionPrefill"):
         return original
@@ -641,6 +806,13 @@ _FUNCTION_PATCH_SPECS: tuple[FunctionPatchSpec, ...] = (
         builder=_build_unified_attention_with_output,
     ),
     FunctionPatchSpec(
+        patch_id="UnifiedAttentionWithOutput",
+        module_path="vllm_mlu.attention.layer",
+        attr_name="unified_attention_with_output",
+        required=False,
+        builder=_build_mlu_unified_attention_with_output,
+    ),
+    FunctionPatchSpec(
         patch_id="PagedAttentionPrefill",
         module_path="vllm.attention.layer",
         attr_name="maybe_get_vit_flash_attn_backend",
@@ -709,6 +881,14 @@ _FUNCTION_PATCH_SPECS: tuple[FunctionPatchSpec, ...] = (
     FunctionPatchSpec(
         patch_id="PagedAttentionDecode",
         module_path="vllm_mlu.v1.attention.backends.flash_attn",
+        object_name="FlashAttentionImpl",
+        attr_name="forward",
+        required=False,
+        builder=_build_mlu_flash_attention_impl_forward,
+    ),
+    FunctionPatchSpec(
+        patch_id="PagedAttentionDecode",
+        module_path="vllm_mlu.attention.backends.flash_attn",
         object_name="FlashAttentionImpl",
         attr_name="forward",
         required=False,
