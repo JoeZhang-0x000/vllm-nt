@@ -693,6 +693,90 @@ def _build_custom_op_unified_attention_with_output() -> Callable[..., None]:
     return _mark_function_patch(unified_attention_with_output, "UnifiedAttentionWithOutput")
 
 
+def _build_custom_op_unified_attention() -> Callable[..., torch.Tensor]:
+    def unified_attention(
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        layer_name: str,
+    ) -> torch.Tensor:
+        layer_mod = importlib.import_module("vllm_mlu.attention.layer")
+        layer_mod.wait_for_kv_layer_from_connector(layer_name)
+        forward_context = layer_mod.get_forward_context()
+        attn_metadata = forward_context.attn_metadata
+        if isinstance(attn_metadata, dict):
+            attn_metadata = attn_metadata[layer_name]
+        self = forward_context.no_compile_layers[layer_name]
+        kv_cache = self.kv_cache[forward_context.virtual_engine]
+        caches = _extract_kv_cache_tensors(kv_cache)
+
+        if caches is None:
+            return self.impl.forward(
+                self,
+                query,
+                key,
+                value,
+                kv_cache,
+                attn_metadata,
+                output=None,
+                kwargs={},
+            )
+
+        key_cache, value_cache = caches
+        scale = getattr(self.impl, "scale", 1 / (query.shape[-1] ** 0.5))
+        seq_lens = getattr(attn_metadata, "seq_lens", None)
+        block_table = getattr(attn_metadata, "block_table", None)
+        query_start_loc = getattr(attn_metadata, "query_start_loc", None)
+        max_query_len = getattr(attn_metadata, "max_query_len", None)
+
+        if (
+            seq_lens is None
+            or block_table is None
+            or query_start_loc is None
+            or max_query_len is None
+        ):
+            return self.impl.forward(
+                self,
+                query,
+                key,
+                value,
+                kv_cache,
+                attn_metadata,
+                output=None,
+                kwargs={},
+            )
+
+        is_decode = query.shape[0] <= int(block_table.shape[0])
+        if is_decode:
+            _record_hit("PagedAttentionDecode", query)
+            decode_query = query.view(
+                int(block_table.shape[0]), -1, query.shape[1], query.shape[2]
+            )
+            return paged_attention_decode(
+                decode_query,
+                key_cache,
+                value_cache,
+                seq_lens,
+                block_table,
+                softmax_scale=scale,
+                causal=True,
+            ).reshape_as(query)
+
+        _record_hit("PagedAttentionPrefill", query)
+        return paged_attention_prefill(
+            query,
+            key,
+            value,
+            query_start_loc,
+            query_start_loc if getattr(attn_metadata, "seq_start_loc", None) is None else attn_metadata.seq_start_loc,
+            int(max_query_len),
+            softmax_scale=scale,
+            causal=True,
+        )
+
+    return _mark_function_patch(unified_attention, "UnifiedAttention")
+
+
 def _build_mlu_attention_forward(original: object) -> object:
     original_fn = cast(Callable[..., object], original)
 
@@ -1232,6 +1316,17 @@ def _build_direct_register_custom_op_intercept(
         replacement = op_func
         if op_name == "unified_kv_cache_update":
             replacement = _build_custom_op_unified_kv_cache_update()
+        elif op_name == "unified_attention":
+            replacement = _build_custom_op_unified_attention()
+            _OPERATOR_STATS["PagedAttentionPrefill"].registered_via = (
+                "custom_op_intercept"
+            )
+            _OPERATOR_STATS["PagedAttentionDecode"].registered_via = (
+                "custom_op_intercept"
+            )
+            logger.info(
+                "vllm-nt: intercepting custom op registration for %s", op_name
+            )
         elif op_name == "unified_attention_with_output":
             replacement = _build_custom_op_unified_attention_with_output()
             _OPERATOR_STATS["PagedAttentionPrefill"].registered_via = (

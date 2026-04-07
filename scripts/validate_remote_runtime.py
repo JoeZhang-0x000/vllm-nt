@@ -167,6 +167,7 @@ def main() -> int:
 
     _print_header("Custom Op Targets")
     for qualified_name in (
+        "vllm.unified_attention",
         "vllm.unified_kv_cache_update",
         "vllm.unified_attention_with_output",
     ):
