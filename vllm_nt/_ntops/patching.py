@@ -1166,6 +1166,85 @@ def _build_rotary_forward_oot(original: object) -> object:
     return _mark_function_patch(forward_oot, "RoPE")
 
 
+def _build_mlu_rotary_forward_oot(original: object) -> object:
+    if _is_function_patch(original, "RoPE"):
+        return original
+    original_fn = cast(Callable[..., object], original)
+
+    def forward_oot(
+        self,
+        positions: torch.Tensor,
+        x: torch.Tensor,
+        offsets: torch.Tensor | None = None,
+    ):
+        if x is None or positions.ndim != 1:
+            return original_fn(self, positions, x, offsets)
+
+        rotary_dim = min(int(getattr(self, "rotary_dim", x.shape[-1])), x.shape[-1])
+        if not getattr(self, "is_neox_style", False) or rotary_dim % 2:
+            return original_fn(self, positions, x, offsets)
+
+        _record_hit("RoPE", x)
+        try:
+            rope_positions = positions if offsets is None else (positions + offsets)
+            cos_sin_cache = self._match_cos_sin_cache_dtype(x)
+            out, _ = rope(
+                rope_positions,
+                x,
+                None,
+                cos_sin_cache=cos_sin_cache,
+                head_size=x.shape[-1],
+                rotary_dim=rotary_dim,
+                is_neox_style=self.is_neox_style,
+            )
+            return out
+        except Exception:
+            return original_fn(self, positions, x, offsets)
+
+    return _mark_function_patch(forward_oot, "RoPE")
+
+
+def _build_mlu_deepseek_rotary_forward_oot(original: object) -> object:
+    if _is_function_patch(original, "RoPE"):
+        return original
+    original_fn = cast(Callable[..., object], original)
+
+    def forward_oot(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor | None = None,
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+        only_prefill: bool = False,
+        only_decode: bool = False,
+    ):
+        base = query if query is not None else key
+        if base is None or positions.ndim != 1:
+            return original_fn(self, positions, query, key, offsets, only_prefill, only_decode)
+
+        rotary_dim = min(int(getattr(self, "rotary_dim", base.shape[-1])), base.shape[-1])
+        if not getattr(self, "is_neox_style", False) or rotary_dim % 2:
+            return original_fn(self, positions, query, key, offsets, only_prefill, only_decode)
+
+        _record_hit("RoPE", base)
+        try:
+            rope_positions = positions if offsets is None else (positions + offsets)
+            cos_sin_cache = self._match_cos_sin_cache_dtype(base)
+            return rope(
+                rope_positions,
+                query,
+                key,
+                cos_sin_cache=cos_sin_cache,
+                head_size=base.shape[-1],
+                rotary_dim=rotary_dim,
+                is_neox_style=self.is_neox_style,
+            )
+        except Exception:
+            return original_fn(self, positions, query, key, offsets, only_prefill, only_decode)
+
+    return _mark_function_patch(forward_oot, "RoPE")
+
+
 def _build_sdpa_patch(original: object) -> object:
     if _is_function_patch(original, "SDPA"):
         return original
@@ -1501,6 +1580,22 @@ _FUNCTION_PATCH_SPECS_BASE: tuple[FunctionPatchSpec, ...] = (
         attr_name="forward_oot",
         required=False,
         builder=_build_rotary_forward_oot,
+    ),
+    FunctionPatchSpec(
+        patch_id="RoPE",
+        module_path="vllm_mlu.model_executor.layers.rotary_embedding",
+        object_name="MLURotaryEmbedding",
+        attr_name="forward_oot",
+        required=False,
+        builder=_build_mlu_rotary_forward_oot,
+    ),
+    FunctionPatchSpec(
+        patch_id="RoPE",
+        module_path="vllm_mlu.model_executor.layers.rotary_embedding",
+        object_name="MLUDeepseekScalingRotaryEmbedding",
+        attr_name="forward_oot",
+        required=False,
+        builder=_build_mlu_deepseek_rotary_forward_oot,
     ),
     FunctionPatchSpec(
         patch_id="SDPA",
