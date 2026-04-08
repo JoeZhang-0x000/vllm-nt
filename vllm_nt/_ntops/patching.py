@@ -516,13 +516,6 @@ def _build_mlu_unified_attention_with_output(original: object) -> object:
                 "enter:mlu_unified_attention_with_output",
                 "vllm-nt: entered mlu unified_attention_with_output wrapper",
             )
-            _log_once(
-                "info",
-                "diag:mlu_uawo:kwargs",
-                "vllm-nt: mlu unified_attention_with_output kwargs_present=%s kwargs_keys=%s",
-                bool(kwargs),
-                sorted(kwargs.keys())[:8] if isinstance(kwargs, dict) else [],
-            )
             layer_mod = importlib.import_module("vllm_mlu.attention.layer")
             layer_mod.wait_for_kv_layer_from_connector(layer_name)
             forward_context = layer_mod.get_forward_context()
@@ -1010,14 +1003,6 @@ def _build_mlu_attention_forward(original: object) -> object:
             getattr(self, "use_output", None),
             getattr(self, "use_direct_call", None),
         )
-        _log_once(
-            "info",
-            "diag:mlu_attention_forward:branch",
-            "vllm-nt: Attention.forward layer=%s kwargs_present=%s kwargs_keys=%s",
-            getattr(self, "layer_name", None),
-            bool(kwargs),
-            sorted(kwargs.keys())[:8] if isinstance(kwargs, dict) else [],
-        )
         try:
             if not getattr(self, "use_output", False):
                 return _call_attention_forward_compat(
@@ -1034,13 +1019,6 @@ def _build_mlu_attention_forward(original: object) -> object:
             output_lse = None
             output_shape = output_shape if output_shape is not None else query.shape
             v_head_dim = getattr(self, "v_head_dim", self.head_size)
-            if not hasattr(self, "v_head_dim"):
-                _log_once(
-                    "info",
-                    "diag:mlu_attention_forward:missing_v_head_dim",
-                    "vllm-nt: Attention.forward missing v_head_dim; falling back to head_size=%s",
-                    self.head_size,
-                )
             if getattr(self, "use_mla", False):
                 output_shape = [output_shape[0], self.num_heads * v_head_dim]
             output = torch.empty(
@@ -1070,13 +1048,6 @@ def _build_mlu_attention_forward(original: object) -> object:
             try:
                 forward_context = layer_mod.get_forward_context()
                 attn_metadata_raw = getattr(forward_context, "attn_metadata", None)
-                _log_once(
-                    "info",
-                    "diag:mlu_attention_forward:metadata_type",
-                    "vllm-nt: Attention.forward metadata type=%s fc_type=%s",
-                    type(attn_metadata_raw).__name__,
-                    type(forward_context).__name__,
-                )
                 if isinstance(attn_metadata_raw, dict):
                     common_meta = attn_metadata_raw.get("common_metadata")
                     if common_meta is not None:
@@ -1089,39 +1060,13 @@ def _build_mlu_attention_forward(original: object) -> object:
                                 "PagedAttentionPrefill" if is_pf else "PagedAttentionDecode",
                                 query,
                             )
-                        else:
-                            _log_once(
-                                "info",
-                                "diag:mlu_attention_forward:zero_tokens",
-                                "vllm-nt: Attention.forward V1 num_actual_tokens=0 skip hit",
-                            )
-                    else:
-                        _log_once(
-                            "info",
-                            "diag:mlu_attention_forward:no_common_meta",
-                            "vllm-nt: Attention.forward V1 dict keys=%s",
-                            list(attn_metadata_raw.keys())[:5],
-                        )
                 elif attn_metadata_raw is not None:
                     # V0 metadata object
                     num_prefills = getattr(attn_metadata_raw, "num_prefills", None)
-                    _log_once(
-                        "info",
-                        "diag:mlu_attention_forward:v0_meta",
-                        "vllm-nt: Attention.forward V0 num_prefills=%s attrs=%s",
-                        num_prefills,
-                        [a for a in dir(attn_metadata_raw) if not a.startswith("_")][:10],
-                    )
                     if num_prefills is not None and int(num_prefills) > 0:
                         _record_hit("PagedAttentionPrefill", query)
                     else:
                         _record_hit("PagedAttentionDecode", query)
-                else:
-                    _log_once(
-                        "warning",
-                        "diag:mlu_attention_forward:none_meta",
-                        "vllm-nt: Attention.forward attn_metadata is None",
-                    )
             except Exception as _hit_exc:
                 _log_once(
                     "warning",
@@ -1130,11 +1075,6 @@ def _build_mlu_attention_forward(original: object) -> object:
                     _hit_exc,
                 )
 
-            _log_once(
-                "info",
-                "diag:mlu_attention_forward:call_target",
-                "vllm-nt: patched Attention.forward calling python unified_attention_with_output directly",
-            )
             attn_output_list = layer_mod.unified_attention_with_output(
                 query_reshaped,
                 key_reshaped,
@@ -1714,18 +1654,6 @@ def _apply_function_patches() -> None:
                         spec=spec, target_obj=target_obj, original=original
                     )
                 )
-                if spec.patch_id in {
-                    "UnifiedAttention2D",
-                    "UnifiedAttentionWithOutput",
-                    "PagedAttentionPrefill",
-                    "PagedAttentionDecode",
-                }:
-                    logger.info(
-                        "vllm-nt: applied function patch %s to %s.%s",
-                        spec.patch_id,
-                        spec.module_path,
-                        spec.attr_name,
-                    )
                 if spec.patch_id in {"UnifiedAttention2D", "UnifiedAttentionWithOutput"}:
                     _set_registered_via("PagedAttentionPrefill", "function_patch")
                     _set_registered_via("PagedAttentionDecode", "function_patch")
@@ -1764,20 +1692,10 @@ def _build_direct_register_custom_op_intercept(
             replacement = _build_custom_op_unified_attention()
             _set_registered_via("PagedAttentionPrefill", "custom_op_intercept")
             _set_registered_via("PagedAttentionDecode", "custom_op_intercept")
-            logger.info(
-                "vllm-nt: intercepting custom op registration for %s (dispatch_key=%s)",
-                op_name,
-                dispatch_key,
-            )
         elif op_name == "unified_attention_with_output":
             replacement = _build_custom_op_unified_attention_with_output()
             _set_registered_via("PagedAttentionPrefill", "custom_op_intercept")
             _set_registered_via("PagedAttentionDecode", "custom_op_intercept")
-            logger.info(
-                "vllm-nt: intercepting custom op registration for %s (dispatch_key=%s)",
-                op_name,
-                dispatch_key,
-            )
         return original(
             op_name,
             replacement,
