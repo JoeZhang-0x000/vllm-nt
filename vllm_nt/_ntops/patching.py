@@ -1406,6 +1406,27 @@ def _build_mlu_random_sample_patch(original: object) -> object:
     return _mark_function_patch(wrapped, "RandomSample")
 
 
+def _build_qwen2_mlp_forward(original: object) -> object:
+    if _is_function_patch(original, "SiluAndMul"):
+        return original
+    original_fn = cast(Callable[..., object], original)
+
+    def forward(self, x: torch.Tensor):
+        try:
+            gate_up = self.gate_up_proj(x)
+            if isinstance(gate_up, tuple):
+                gate_up = gate_up[0]
+            x = _act("SiluAndMul", gate_up, nt_silu)
+            down = self.down_proj(x)
+            if isinstance(down, tuple):
+                return down[0]
+            return down
+        except Exception:
+            return original_fn(self, x)
+
+    return _mark_function_patch(forward, "SiluAndMul")
+
+
 def _build_sdpa_patch(original: object) -> object:
     if _is_function_patch(original, "SDPA"):
         return original
@@ -1760,6 +1781,14 @@ _FUNCTION_PATCH_SPECS_BASE: tuple[FunctionPatchSpec, ...] = (
         attr_name="forward_oot",
         required=False,
         builder=_build_mlu_deepseek_rotary_forward_oot,
+    ),
+    FunctionPatchSpec(
+        patch_id="SiluAndMul",
+        module_path="vllm.model_executor.models.qwen2",
+        object_name="Qwen2MLP",
+        attr_name="forward",
+        required=False,
+        builder=_build_qwen2_mlp_forward,
     ),
     FunctionPatchSpec(
         patch_id="TopKTopP",

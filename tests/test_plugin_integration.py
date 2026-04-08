@@ -263,6 +263,41 @@ class TestPluginRegistration:
         assert out is sentinel
         assert summary["operators"]["RejectionSample"]["hits"] == 1
 
+    def test_qwen2_mlp_patch_tracks_silu_and_mul_hits(self):
+        _require_runtime()
+        import torch
+        import vllm_nt._ntops.patching as patching
+
+        _reset_usage_state = patching._reset_usage_state
+        get_usage_summary = patching.get_usage_summary
+
+        class DummyProj:
+            def __init__(self, out: torch.Tensor):
+                self.out = out
+
+            def __call__(self, x: torch.Tensor):
+                return self.out, None
+
+        class DummyMLP:
+            def __init__(self):
+                self.gate_up_proj = DummyProj(
+                    torch.arange(8, dtype=torch.float32).reshape(1, 8)
+                )
+                self.down_proj = DummyProj(
+                    torch.arange(4, dtype=torch.float32).reshape(1, 4)
+                )
+
+        _reset_usage_state()
+        wrapped = patching._build_qwen2_mlp_forward(
+            lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected fallback"))
+        )
+
+        out = wrapped(DummyMLP(), torch.ones(1, 4))
+        summary = cast(dict[str, Any], get_usage_summary())
+
+        assert out.shape == (1, 4)
+        assert summary["operators"]["SiluAndMul"]["hits"] == 1
+
     def test_optional_ops_are_registered_in_summary_when_available(self):
         _require_runtime()
         from vllm.model_executor.layers import activation, layernorm
