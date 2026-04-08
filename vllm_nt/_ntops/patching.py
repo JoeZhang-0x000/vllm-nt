@@ -935,6 +935,8 @@ def _build_custom_op_unified_attention() -> Callable[..., torch.Tensor]:
 
 
 def _build_mlu_attention_forward(original: object) -> object:
+    if _is_function_patch(original, "UnifiedAttentionWithOutput"):
+        return original
     original_fn = cast(Callable[..., object], original)
 
     def forward(
@@ -945,6 +947,13 @@ def _build_mlu_attention_forward(original: object) -> object:
         output_shape: torch.Size | None = None,
         kwargs: dict[str, Any] | None = None,
     ):
+        _log_once(
+            "info",
+            "enter:mlu_attention_forward_patch",
+            "vllm-nt: entered patched Attention.forward (use_output=%s use_direct_call=%s)",
+            getattr(self, "use_output", None),
+            getattr(self, "use_direct_call", None),
+        )
         try:
             if (
                 not getattr(self, "use_output", False)
@@ -994,7 +1003,13 @@ def _build_mlu_attention_forward(original: object) -> object:
             if output_lse is not None:
                 return output.view(-1, hidden_size), output_lse
             return output.view(-1, hidden_size)
-        except Exception:
+        except Exception as _exc:
+            _log_once(
+                "warning",
+                "fallback:mlu_attention_forward_patch",
+                "vllm-nt: patched Attention.forward falling back to original (%s)",
+                _exc,
+            )
             return _call_attention_forward_compat(
                 original_fn, self, query, key, value, output_shape, kwargs
             )
@@ -1418,6 +1433,19 @@ _FUNCTION_PATCH_SPECS_BASE: tuple[FunctionPatchSpec, ...] = (
         attr_name="forward",
         required=False,
         builder=_build_mlu_flash_attention_impl_forward,
+    ),
+    # Patch Attention.forward AFTER vllm_mlu.attention.layer is imported above,
+    # because importing that module runs MluHijackObject.apply_hijack which does
+    # setattr(Attention, "forward", Attention_MluHjack.forward) — a direct copy.
+    # Patching Attention_MluHjack.forward afterward has no effect on Attention.forward.
+    # We must overwrite Attention.forward itself, after the hijack has already run.
+    FunctionPatchSpec(
+        patch_id="UnifiedAttentionWithOutput",
+        module_path="vllm.attention.layer",
+        object_name="Attention",
+        attr_name="forward",
+        required=False,
+        builder=_build_mlu_attention_forward,
     ),
 )
 
