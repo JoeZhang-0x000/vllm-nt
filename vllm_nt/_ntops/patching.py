@@ -934,6 +934,55 @@ def _build_custom_op_unified_attention() -> Callable[..., torch.Tensor]:
     return _mark_function_patch(unified_attention, "UnifiedAttention")
 
 
+def _repatch_attention_forward_if_needed() -> None:
+    """Re-apply the Attention.forward patch after a MLU hijack may have overwritten it."""
+    try:
+        from vllm.attention.layer import Attention
+
+        current = getattr(Attention, "forward", None)
+        if _is_function_patch(current, "UnifiedAttentionWithOutput"):
+            return  # already our version, nothing to do
+        replacement = _build_mlu_attention_forward(current)
+        if replacement is current:
+            return
+        setattr(Attention, "forward", replacement)
+        _set_registered_via("PagedAttentionPrefill", "function_patch")
+        _set_registered_via("PagedAttentionDecode", "function_patch")
+        _log_once(
+            "info",
+            "repatch:attention_forward",
+            "vllm-nt: re-applied Attention.forward patch after MLU hijack",
+        )
+    except Exception as exc:
+        logger.debug("vllm-nt: failed to re-apply Attention.forward: %s", exc)
+
+
+def _build_mlu_hijack_apply_hijack_intercept(original: object) -> object:
+    """Wrap MluHijackObject.apply_hijack to re-apply our Attention.forward patch right
+    after the MLU hijack overwrites it.  This is timing-agnostic: it fires whether
+    vllm_mlu.attention.layer is imported early (during ensure_registered) or late
+    (during EngineCore subprocess worker initialization).
+    """
+    if _is_function_patch(original, "MluHijackApplyHijack"):
+        return original
+    original_fn = cast(Callable[..., object], original)
+
+    def apply_hijack(obj, org_func, hijack_func, verify_orig_func_exists=False):
+        original_fn(obj, org_func, hijack_func, verify_orig_func_exists)
+        # Determine which attribute was just hijacked.
+        if isinstance(org_func, str):
+            func_name = org_func
+        else:
+            try:
+                func_name = org_func.__name__.split("__")[-1]
+            except Exception:
+                func_name = None
+        if func_name == "forward":
+            _repatch_attention_forward_if_needed()
+
+    return _mark_function_patch(apply_hijack, "MluHijackApplyHijack")
+
+
 def _build_mlu_attention_forward(original: object) -> object:
     if _is_function_patch(original, "UnifiedAttentionWithOutput"):
         return original
@@ -1331,6 +1380,17 @@ _OPERATOR_STATS = {name: OperatorStats() for name in _OPERATOR_SPECS} | {
     "SDPA": OperatorStats(),
 }
 _FUNCTION_PATCH_SPECS_BASE: tuple[FunctionPatchSpec, ...] = (
+    # Must come FIRST: intercept MluHijackObject.apply_hijack before
+    # vllm_mlu.attention.layer is imported, so that when the hijack overwrites
+    # Attention.forward we immediately re-apply our NT patch on top.
+    FunctionPatchSpec(
+        patch_id="UnifiedAttentionWithOutput",
+        module_path="vllm_mlu.mlu_hijack_utils",
+        object_name="MluHijackObject",
+        attr_name="apply_hijack",
+        required=False,
+        builder=_build_mlu_hijack_apply_hijack_intercept,
+    ),
     FunctionPatchSpec(
         patch_id="StoreKVCache",
         module_path="vllm.model_executor.layers.attention.attention",
