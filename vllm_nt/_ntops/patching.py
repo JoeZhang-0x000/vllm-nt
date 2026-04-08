@@ -1004,13 +1004,16 @@ def _build_mlu_attention_forward(original: object) -> object:
             getattr(self, "use_direct_call", None),
         )
         try:
-            if (
-                not getattr(self, "use_output", False)
-                or getattr(self, "use_direct_call", False)
-            ):
+            if not getattr(self, "use_output", False):
                 return _call_attention_forward_compat(
                     original_fn, self, query, key, value, output_shape, kwargs
                 )
+            # Proceed for both use_direct_call=True and use_direct_call=False.
+            # For use_direct_call=True (MLU non-OOT + V1, or V0), we still call
+            # unified_attention_with_output directly. Our patched version handles
+            # the V1 dict-metadata path (NT kernels + _record_hit).  For V0
+            # non-dict metadata it falls back to the original impl, which is
+            # identical to what Attention_MluHjack.forward would have done.
 
             layer_mod = importlib.import_module("vllm_mlu.attention.layer")
             output_lse = None
