@@ -1245,6 +1245,167 @@ def _build_mlu_deepseek_rotary_forward_oot(original: object) -> object:
     return _mark_function_patch(forward_oot, "RoPE")
 
 
+def _build_apply_top_k_top_p_patch(original: object) -> object:
+    if _is_function_patch(original, "TopKTopP"):
+        return original
+    original_fn = cast(Callable[..., object], original)
+
+    def wrapped(
+        logits: torch.Tensor,
+        k: torch.Tensor | None,
+        p: torch.Tensor | None,
+    ):
+        if k is not None or p is not None:
+            _record_hit("TopKTopP", logits)
+        return original_fn(logits, k, p)
+
+    return _mark_function_patch(wrapped, "TopKTopP")
+
+
+def _build_random_sample_patch(original: object) -> object:
+    if _is_function_patch(original, "RandomSample"):
+        return original
+    original_fn = cast(Callable[..., object], original)
+
+    def wrapped(probs: torch.Tensor, generators: dict[int, torch.Generator]):
+        _record_hit("RandomSample", probs)
+        return original_fn(probs, generators)
+
+    return _mark_function_patch(wrapped, "RandomSample")
+
+
+def _build_rejection_sample_patch(original: object) -> object:
+    if _is_function_patch(original, "RejectionSample"):
+        return original
+    original_fn = cast(Callable[..., object], original)
+
+    def wrapped(*args: object, **kwargs: object):
+        target = kwargs.get("target_logits")
+        if target is None:
+            target = kwargs.get("target_probs")
+        if target is None and len(args) >= 6 and isinstance(args[5], torch.Tensor):
+            target = args[5]
+        if isinstance(target, torch.Tensor):
+            _record_hit("RejectionSample", target)
+        return original_fn(*args, **kwargs)
+
+    return _mark_function_patch(wrapped, "RejectionSample")
+
+
+def _apply_min_p_mask(logits: torch.Tensor, min_p: torch.Tensor | None) -> torch.Tensor:
+    if min_p is None:
+        return logits
+    min_p = min_p.to(device=logits.device, dtype=logits.dtype)
+    if not torch.any(min_p):
+        return logits
+
+    probs = torch.nn.functional.softmax(logits, dim=-1)
+    max_probs = torch.amax(probs, dim=-1, keepdim=True)
+    adjusted_min_p = max_probs * min_p.unsqueeze(-1)
+    logits.masked_fill_(probs < adjusted_min_p, -float("inf"))
+    return logits
+
+
+def _build_mlu_apply_topkp_v2_patch(original: object) -> object:
+    if _is_function_patch(original, "TopKTopP"):
+        return original
+    original_fn = cast(Callable[..., object], original)
+
+    def wrapped(
+        logits: torch.Tensor,
+        index_in: torch.Tensor,
+        temperature_list: torch.Tensor,
+        minp_list: torch.Tensor | None,
+        topk_list: torch.Tensor | None,
+        topp_list: torch.Tensor | None,
+        logits_out: torch.Tensor | None = None,
+        sorted_logits_out: torch.Tensor | None = None,
+        index_out: torch.Tensor | None = None,
+        true_select_len: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        _record_hit("TopKTopP", logits)
+        try:
+            from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p_pytorch
+
+            filtered = logits.to(torch.float32).clone()
+            temperature = temperature_list.to(device=filtered.device, dtype=filtered.dtype)
+            temperature = torch.where(
+                temperature.abs() < 1e-5,
+                torch.ones_like(temperature),
+                temperature,
+            )
+            filtered.div_(temperature.unsqueeze(-1))
+            filtered = _apply_min_p_mask(filtered, minp_list)
+            topk = (
+                None
+                if topk_list is None
+                else topk_list.to(device=filtered.device)
+            )
+            topp = (
+                None
+                if topp_list is None
+                else topp_list.to(device=filtered.device)
+            )
+            filtered = apply_top_k_top_p_pytorch(filtered, topk, topp)
+
+            sorted_logits, sorted_indices = filtered.sort(dim=-1, descending=True)
+            expanded_index = index_in.to(device=filtered.device, dtype=torch.int64)
+            if expanded_index.ndim == 1:
+                expanded_index = expanded_index.unsqueeze(0).expand(filtered.shape[0], -1)
+            sorted_index = expanded_index.gather(1, sorted_indices)
+            selected = torch.isfinite(filtered).sum(dim=-1)
+
+            logits_res = filtered if logits_out is None else logits_out.copy_(filtered)
+            sorted_logits_res = (
+                sorted_logits
+                if sorted_logits_out is None
+                else sorted_logits_out.copy_(sorted_logits)
+            )
+            index_res = (
+                sorted_index
+                if index_out is None
+                else index_out.copy_(sorted_index.to(dtype=index_out.dtype))
+            )
+            true_select_len_res = (
+                selected
+                if true_select_len is None
+                else true_select_len.copy_(selected.to(dtype=true_select_len.dtype))
+            )
+            return logits_res, sorted_logits_res, index_res, true_select_len_res
+        except Exception:
+            return original_fn(
+                logits,
+                index_in,
+                temperature_list,
+                minp_list,
+                topk_list,
+                topp_list,
+                logits_out,
+                sorted_logits_out,
+                index_out,
+                true_select_len,
+            )
+
+    return _mark_function_patch(wrapped, "TopKTopP")
+
+
+def _build_mlu_random_sample_patch(original: object) -> object:
+    if _is_function_patch(original, "RandomSample"):
+        return original
+    original_fn = cast(Callable[..., object], original)
+
+    def wrapped(probs: torch.Tensor, generators: dict[int, torch.Generator]):
+        _record_hit("RandomSample", probs)
+        try:
+            from vllm.v1.sample.ops.topk_topp_sampler import random_sample
+
+            return random_sample(probs, generators)
+        except Exception:
+            return original_fn(probs, generators)
+
+    return _mark_function_patch(wrapped, "RandomSample")
+
+
 def _build_sdpa_patch(original: object) -> object:
     if _is_function_patch(original, "SDPA"):
         return original
@@ -1496,6 +1657,9 @@ _OPERATOR_STATS = {name: OperatorStats() for name in _OPERATOR_SPECS} | {
     "PagedAttentionDecode": OperatorStats(),
     "RoPE": OperatorStats(),
     "SDPA": OperatorStats(),
+    "TopKTopP": OperatorStats(),
+    "RandomSample": OperatorStats(),
+    "RejectionSample": OperatorStats(),
 }
 _FUNCTION_PATCH_SPECS_BASE: tuple[FunctionPatchSpec, ...] = (
     # Must come FIRST: intercept MluHijackObject.apply_hijack before
@@ -1596,6 +1760,41 @@ _FUNCTION_PATCH_SPECS_BASE: tuple[FunctionPatchSpec, ...] = (
         attr_name="forward_oot",
         required=False,
         builder=_build_mlu_deepseek_rotary_forward_oot,
+    ),
+    FunctionPatchSpec(
+        patch_id="TopKTopP",
+        module_path="vllm.v1.sample.ops.topk_topp_sampler",
+        attr_name="apply_top_k_top_p",
+        required=False,
+        builder=_build_apply_top_k_top_p_patch,
+    ),
+    FunctionPatchSpec(
+        patch_id="RandomSample",
+        module_path="vllm.v1.sample.ops.topk_topp_sampler",
+        attr_name="random_sample",
+        required=False,
+        builder=_build_random_sample_patch,
+    ),
+    FunctionPatchSpec(
+        patch_id="RejectionSample",
+        module_path="vllm.v1.sample.rejection_sampler",
+        attr_name="rejection_sample",
+        required=False,
+        builder=_build_rejection_sample_patch,
+    ),
+    FunctionPatchSpec(
+        patch_id="TopKTopP",
+        module_path="vllm_mlu._mlu_ops",
+        attr_name="apply_topkp_v2",
+        required=False,
+        builder=_build_mlu_apply_topkp_v2_patch,
+    ),
+    FunctionPatchSpec(
+        patch_id="RandomSample",
+        module_path="vllm_mlu.v1.sample.sampler",
+        attr_name="mlu_random_sample",
+        required=False,
+        builder=_build_mlu_random_sample_patch,
     ),
     FunctionPatchSpec(
         patch_id="SDPA",

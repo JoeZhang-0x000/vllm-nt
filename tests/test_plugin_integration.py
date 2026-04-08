@@ -189,6 +189,80 @@ class TestPluginRegistration:
         assert "RMSNorm" in summary["hit_ops"]
         assert "SiluAndMul" in summary["missed_ops"]
 
+    def test_mlu_topkp_patch_tracks_hits(self):
+        _require_runtime()
+        import torch
+        import vllm_nt._ntops.patching as patching
+
+        _reset_usage_state = patching._reset_usage_state
+        get_usage_summary = patching.get_usage_summary
+
+        _reset_usage_state()
+        wrapped = patching._build_mlu_apply_topkp_v2_patch(
+            lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected fallback"))
+        )
+
+        logits = torch.tensor([[1.0, 0.5, -1.0], [0.2, 0.1, 0.0]], dtype=torch.float32)
+        index_in = torch.arange(logits.shape[-1], dtype=torch.int32)
+        temperature = torch.ones(logits.shape[0], dtype=torch.float32)
+        top_k = torch.tensor([2, 2], dtype=torch.int32)
+
+        logits_out, sorted_logits_out, index_out, true_select_len = wrapped(
+            logits,
+            index_in,
+            temperature,
+            None,
+            top_k,
+            None,
+        )
+        summary = cast(dict[str, Any], get_usage_summary())
+
+        assert logits_out.shape == logits.shape
+        assert sorted_logits_out.shape == logits.shape
+        assert index_out.shape == logits.shape
+        assert true_select_len.shape == (logits.shape[0],)
+        assert summary["operators"]["TopKTopP"]["hits"] == 1
+
+    def test_mlu_random_sample_patch_tracks_hits(self):
+        _require_runtime()
+        import torch
+        import vllm_nt._ntops.patching as patching
+
+        _reset_usage_state = patching._reset_usage_state
+        get_usage_summary = patching.get_usage_summary
+
+        _reset_usage_state()
+        wrapped = patching._build_mlu_random_sample_patch(
+            lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected fallback"))
+        )
+
+        probs = torch.tensor([[0.6, 0.4], [0.1, 0.9]], dtype=torch.float32)
+        sampled = wrapped(probs, {})
+        summary = cast(dict[str, Any], get_usage_summary())
+
+        assert sampled.shape == (2,)
+        assert summary["operators"]["RandomSample"]["hits"] == 1
+
+    def test_rejection_sample_patch_tracks_hits(self):
+        _require_runtime()
+        import torch
+        import vllm_nt._ntops.patching as patching
+
+        _reset_usage_state = patching._reset_usage_state
+        get_usage_summary = patching.get_usage_summary
+
+        _reset_usage_state()
+        sentinel = torch.zeros((1, 2), dtype=torch.int32)
+        wrapped = patching._build_rejection_sample_patch(
+            lambda *args, **kwargs: sentinel
+        )
+
+        out = wrapped(None, None, None, None, None, torch.ones(1, 4), None, None)
+        summary = cast(dict[str, Any], get_usage_summary())
+
+        assert out is sentinel
+        assert summary["operators"]["RejectionSample"]["hits"] == 1
+
     def test_optional_ops_are_registered_in_summary_when_available(self):
         _require_runtime()
         from vllm.model_executor.layers import activation, layernorm
