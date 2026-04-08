@@ -1046,7 +1046,14 @@ def _build_mlu_attention_forward(original: object) -> object:
             # importable yet at ensure_registered() time.)
             try:
                 forward_context = layer_mod.get_forward_context()
-                attn_metadata_raw = forward_context.attn_metadata
+                attn_metadata_raw = getattr(forward_context, "attn_metadata", None)
+                _log_once(
+                    "info",
+                    "diag:mlu_attention_forward:metadata_type",
+                    "vllm-nt: Attention.forward metadata type=%s fc_type=%s",
+                    type(attn_metadata_raw).__name__,
+                    type(forward_context).__name__,
+                )
                 if isinstance(attn_metadata_raw, dict):
                     common_meta = attn_metadata_raw.get("common_metadata")
                     if common_meta is not None:
@@ -1059,16 +1066,42 @@ def _build_mlu_attention_forward(original: object) -> object:
                                 "PagedAttentionPrefill" if is_pf else "PagedAttentionDecode",
                                 query,
                             )
-                else:
+                        else:
+                            _log_once(
+                                "info",
+                                "diag:mlu_attention_forward:zero_tokens",
+                                "vllm-nt: Attention.forward V1 num_actual_tokens=0 skip hit",
+                            )
+                    else:
+                        _log_once(
+                            "info",
+                            "diag:mlu_attention_forward:no_common_meta",
+                            "vllm-nt: Attention.forward V1 dict keys=%s",
+                            list(attn_metadata_raw.keys())[:5],
+                        )
+                elif attn_metadata_raw is not None:
                     # V0 metadata object
                     num_prefills = getattr(attn_metadata_raw, "num_prefills", None)
+                    _log_once(
+                        "info",
+                        "diag:mlu_attention_forward:v0_meta",
+                        "vllm-nt: Attention.forward V0 num_prefills=%s attrs=%s",
+                        num_prefills,
+                        [a for a in dir(attn_metadata_raw) if not a.startswith("_")][:10],
+                    )
                     if num_prefills is not None and int(num_prefills) > 0:
                         _record_hit("PagedAttentionPrefill", query)
                     else:
                         _record_hit("PagedAttentionDecode", query)
+                else:
+                    _log_once(
+                        "warning",
+                        "diag:mlu_attention_forward:none_meta",
+                        "vllm-nt: Attention.forward attn_metadata is None",
+                    )
             except Exception as _hit_exc:
                 _log_once(
-                    "debug",
+                    "warning",
                     "hit_record_failed:mlu_attention_forward",
                     "vllm-nt: hit recording in Attention.forward failed: %s",
                     _hit_exc,
