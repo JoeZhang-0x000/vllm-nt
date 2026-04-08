@@ -1033,8 +1033,16 @@ def _build_mlu_attention_forward(original: object) -> object:
             layer_mod = importlib.import_module("vllm_mlu.attention.layer")
             output_lse = None
             output_shape = output_shape if output_shape is not None else query.shape
+            v_head_dim = getattr(self, "v_head_dim", self.head_size)
+            if not hasattr(self, "v_head_dim"):
+                _log_once(
+                    "info",
+                    "diag:mlu_attention_forward:missing_v_head_dim",
+                    "vllm-nt: Attention.forward missing v_head_dim; falling back to head_size=%s",
+                    self.head_size,
+                )
             if getattr(self, "use_mla", False):
-                output_shape = [output_shape[0], self.num_heads * self.v_head_dim]
+                output_shape = [output_shape[0], self.num_heads * v_head_dim]
             output = torch.empty(
                 output_shape,
                 dtype=self.dtype if query.dtype == torch.int8 else query.dtype,
@@ -1042,7 +1050,7 @@ def _build_mlu_attention_forward(original: object) -> object:
             )
             hidden_size = output_shape[-1]
             query_reshaped = query.view(-1, self.num_heads, self.head_size)
-            output_reshaped = output.view(-1, self.num_heads, self.v_head_dim)
+            output_reshaped = output.view(-1, self.num_heads, v_head_dim)
             key_reshaped = (
                 None
                 if key is None
@@ -1051,7 +1059,7 @@ def _build_mlu_attention_forward(original: object) -> object:
             value_reshaped = (
                 None
                 if value is None
-                else value.view(-1, self.num_kv_heads, self.v_head_dim)
+                else value.view(-1, self.num_kv_heads, v_head_dim)
             )
 
             # Record NT hit directly from forward context so that we don't
