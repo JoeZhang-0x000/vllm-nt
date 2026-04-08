@@ -2,6 +2,8 @@
 
 import ast
 from pathlib import Path
+import sys
+from types import ModuleType
 from typing import Any, cast
 
 import pytest
@@ -153,7 +155,7 @@ class TestPluginRegistration:
         assert "Embedding" in summary["registered_ops"]
         assert set(summary["missed_ops"]) == set(summary["registered_ops"])
         assert all(
-            details["registered_via"] in {"oot", "monkey_patch"}
+            details["registered_via"] in {"oot", "monkey_patch", "function_patch", None}
             for details in summary["operators"].values()
         )
 
@@ -204,6 +206,199 @@ class TestPluginRegistration:
             assert "GeluAndMul" in summary["registered_ops"]
         if hasattr(layernorm, "GemmaRMSNorm"):
             assert "GemmaRMSNorm" in summary["registered_ops"]
+
+    def test_function_patch_spec_can_patch_fake_module(self, monkeypatch):
+        _require_runtime()
+        import vllm_nt._ntops.patching as patching
+
+        parent = ModuleType("fakepkg")
+        child = ModuleType("fakepkg.child")
+
+        def original(*args, **kwargs):
+            return ("original", args, kwargs)
+
+        child.unified_attention_2d = original
+        parent.child = child
+        monkeypatch.setitem(sys.modules, "fakepkg", parent)
+        monkeypatch.setitem(sys.modules, "fakepkg.child", child)
+
+        spec = patching.FunctionPatchSpec(
+            patch_id="UnifiedAttention2D",
+            module_path="fakepkg.child",
+            attr_name="unified_attention_2d",
+            required=True,
+            builder=lambda fn: (lambda *args, **kwargs: ("patched", fn(*args, **kwargs))),
+        )
+
+        monkeypatch.setattr(patching, "_FUNCTION_PATCH_SPECS", (spec,))
+        monkeypatch.setattr(patching, "_APPLIED_FUNCTION_PATCHES", [])
+        monkeypatch.setitem(
+            patching._OPERATOR_STATS,
+            "PagedAttentionPrefill",
+            patching.OperatorStats(),
+        )
+        monkeypatch.setitem(
+            patching._OPERATOR_STATS,
+            "PagedAttentionDecode",
+            patching.OperatorStats(),
+        )
+
+        patching._apply_function_patches()
+
+        assert child.unified_attention_2d(1, flag=True)[0] == "patched"
+        assert (
+            patching._OPERATOR_STATS["PagedAttentionPrefill"].registered_via
+            == "function_patch"
+        )
+        assert (
+            patching._OPERATOR_STATS["PagedAttentionDecode"].registered_via
+            == "function_patch"
+        )
+
+    def test_function_patch_spec_can_patch_fake_object_attr(self, monkeypatch):
+        _require_runtime()
+        import vllm_nt._ntops.patching as patching
+
+        parent = ModuleType("fakepkg_object")
+        child = ModuleType("fakepkg_object.child")
+
+        class _Functional:
+            @staticmethod
+            def scaled_dot_product_attention(*args, **kwargs):
+                return ("original", args, kwargs)
+
+        child.F = _Functional
+        parent.child = child
+        monkeypatch.setitem(sys.modules, "fakepkg_object", parent)
+        monkeypatch.setitem(sys.modules, "fakepkg_object.child", child)
+
+        spec = patching.FunctionPatchSpec(
+            patch_id="SDPA",
+            module_path="fakepkg_object.child",
+            object_name="F",
+            attr_name="scaled_dot_product_attention",
+            required=True,
+            builder=lambda fn: (lambda *args, **kwargs: ("patched", fn(*args, **kwargs))),
+        )
+
+        monkeypatch.setattr(patching, "_FUNCTION_PATCH_SPECS", (spec,))
+        monkeypatch.setattr(patching, "_APPLIED_FUNCTION_PATCHES", [])
+        monkeypatch.setitem(
+            patching._OPERATOR_STATS,
+            "SDPA",
+            patching.OperatorStats(),
+        )
+
+        patching._apply_function_patches()
+
+        assert child.F.scaled_dot_product_attention(1, flag=True)[0] == "patched"
+        assert patching._OPERATOR_STATS["SDPA"].registered_via == "function_patch"
+
+    def test_custom_op_rebinding_is_gated_and_updates_stats(self, monkeypatch):
+        _require_runtime()
+        import vllm_nt._ntops.patching as patching
+
+        calls: list[tuple[str, str]] = []
+
+        class _Platform:
+            dispatch_key = "MLU"
+
+        monkeypatch.setenv("VLLM_NT_ENABLE_CUSTOM_OP_REBIND", "1")
+        monkeypatch.setattr(
+            patching,
+            "_APPLIED_CUSTOM_OP_REBINDS",
+            [],
+        )
+        monkeypatch.setattr(
+            patching,
+            "_rebind_custom_op",
+            lambda op_name, op_func, dispatch_key: (
+                calls.append((op_name, dispatch_key))
+                or patching._AppliedCustomOpRebind(op_name, dispatch_key, object())
+            ),
+        )
+        monkeypatch.setattr("vllm.platforms.current_platform", _Platform())
+        monkeypatch.setitem(
+            patching._OPERATOR_STATS,
+            "PagedAttentionPrefill",
+            patching.OperatorStats(),
+        )
+        monkeypatch.setitem(
+            patching._OPERATOR_STATS,
+            "PagedAttentionDecode",
+            patching.OperatorStats(),
+        )
+
+        patching._apply_custom_op_rebindings()
+
+        assert calls == [
+            ("unified_kv_cache_update", "MLU"),
+            ("unified_attention_with_output", "MLU"),
+        ]
+        assert (
+            patching._OPERATOR_STATS["PagedAttentionPrefill"].registered_via
+            == "custom_op_rebind"
+        )
+        assert (
+            patching._OPERATOR_STATS["PagedAttentionDecode"].registered_via
+            == "custom_op_rebind"
+        )
+
+    def test_custom_op_register_intercept_swaps_registration_target(
+        self, monkeypatch
+    ):
+        _require_runtime()
+        import vllm_nt._ntops.patching as patching
+
+        calls: list[tuple[str, object]] = []
+
+        fake_torch_utils = ModuleType("vllm.utils.torch_utils")
+
+        def fake_direct_register_custom_op(
+            op_name,
+            op_func,
+            mutates_args=None,
+            fake_impl=None,
+            target_lib=None,
+            dispatch_key=None,
+            tags=(),
+        ):
+            calls.append((op_name, op_func))
+
+        fake_torch_utils.direct_register_custom_op = fake_direct_register_custom_op
+        monkeypatch.setitem(sys.modules, "vllm.utils.torch_utils", fake_torch_utils)
+        monkeypatch.setenv("VLLM_NT_ENABLE_CUSTOM_OP_REGISTER_INTERCEPT", "1")
+        monkeypatch.setattr(patching, "_INSTALLED_CUSTOM_OP_INTERCEPT", None)
+        monkeypatch.setitem(
+            patching._OPERATOR_STATS,
+            "PagedAttentionPrefill",
+            patching.OperatorStats(),
+        )
+        monkeypatch.setitem(
+            patching._OPERATOR_STATS,
+            "PagedAttentionDecode",
+            patching.OperatorStats(),
+        )
+
+        patching._install_custom_op_register_intercept()
+
+        assert fake_torch_utils.direct_register_custom_op is not fake_direct_register_custom_op
+        fake_torch_utils.direct_register_custom_op(
+            "unified_attention_with_output",
+            lambda *args, **kwargs: None,
+        )
+
+        assert calls
+        assert calls[0][0] == "unified_attention_with_output"
+        assert calls[0][1] is not None
+        assert (
+            patching._OPERATOR_STATS["PagedAttentionPrefill"].registered_via
+            == "custom_op_intercept"
+        )
+        assert (
+            patching._OPERATOR_STATS["PagedAttentionDecode"].registered_via
+            == "custom_op_intercept"
+        )
 
     def test_gelu_and_mul_forward_uses_nt_tanh_path(self, monkeypatch):
         _require_runtime()
@@ -320,7 +515,7 @@ class TestPluginRegistration:
         )
 
         x = torch.arange(8, dtype=torch.float32).reshape(2, 4)
-        residual = torch.ones_like(x)
+        residual = torch.ones((x.shape[0], DummyLayer.weight.shape[0]), dtype=x.dtype)
         out = _nt_unquantized_linear_apply(
             DummyLinearMethod(), DummyLayer(), x, residual=residual
         )
