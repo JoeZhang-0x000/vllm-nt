@@ -516,6 +516,13 @@ def _build_mlu_unified_attention_with_output(original: object) -> object:
                 "enter:mlu_unified_attention_with_output",
                 "vllm-nt: entered mlu unified_attention_with_output wrapper",
             )
+            _log_once(
+                "info",
+                "diag:mlu_uawo:kwargs",
+                "vllm-nt: mlu unified_attention_with_output kwargs_present=%s kwargs_keys=%s",
+                bool(kwargs),
+                sorted(kwargs.keys())[:8] if isinstance(kwargs, dict) else [],
+            )
             layer_mod = importlib.import_module("vllm_mlu.attention.layer")
             layer_mod.wait_for_kv_layer_from_connector(layer_name)
             forward_context = layer_mod.get_forward_context()
@@ -1003,6 +1010,14 @@ def _build_mlu_attention_forward(original: object) -> object:
             getattr(self, "use_output", None),
             getattr(self, "use_direct_call", None),
         )
+        _log_once(
+            "info",
+            "diag:mlu_attention_forward:branch",
+            "vllm-nt: Attention.forward layer=%s kwargs_present=%s kwargs_keys=%s",
+            getattr(self, "layer_name", None),
+            bool(kwargs),
+            sorted(kwargs.keys())[:8] if isinstance(kwargs, dict) else [],
+        )
         try:
             if not getattr(self, "use_output", False):
                 return _call_attention_forward_compat(
@@ -1107,6 +1122,11 @@ def _build_mlu_attention_forward(original: object) -> object:
                     _hit_exc,
                 )
 
+            _log_once(
+                "info",
+                "diag:mlu_attention_forward:call_target",
+                "vllm-nt: patched Attention.forward calling python unified_attention_with_output directly",
+            )
             attn_output_list = layer_mod.unified_attention_with_output(
                 query_reshaped,
                 key_reshaped,
@@ -1686,6 +1706,18 @@ def _apply_function_patches() -> None:
                         spec=spec, target_obj=target_obj, original=original
                     )
                 )
+                if spec.patch_id in {
+                    "UnifiedAttention2D",
+                    "UnifiedAttentionWithOutput",
+                    "PagedAttentionPrefill",
+                    "PagedAttentionDecode",
+                }:
+                    logger.info(
+                        "vllm-nt: applied function patch %s to %s.%s",
+                        spec.patch_id,
+                        spec.module_path,
+                        spec.attr_name,
+                    )
                 if spec.patch_id in {"UnifiedAttention2D", "UnifiedAttentionWithOutput"}:
                     _set_registered_via("PagedAttentionPrefill", "function_patch")
                     _set_registered_via("PagedAttentionDecode", "function_patch")
@@ -1725,14 +1757,18 @@ def _build_direct_register_custom_op_intercept(
             _set_registered_via("PagedAttentionPrefill", "custom_op_intercept")
             _set_registered_via("PagedAttentionDecode", "custom_op_intercept")
             logger.info(
-                "vllm-nt: intercepting custom op registration for %s", op_name
+                "vllm-nt: intercepting custom op registration for %s (dispatch_key=%s)",
+                op_name,
+                dispatch_key,
             )
         elif op_name == "unified_attention_with_output":
             replacement = _build_custom_op_unified_attention_with_output()
             _set_registered_via("PagedAttentionPrefill", "custom_op_intercept")
             _set_registered_via("PagedAttentionDecode", "custom_op_intercept")
             logger.info(
-                "vllm-nt: intercepting custom op registration for %s", op_name
+                "vllm-nt: intercepting custom op registration for %s (dispatch_key=%s)",
+                op_name,
+                dispatch_key,
             )
         return original(
             op_name,
