@@ -1039,6 +1039,41 @@ def _build_mlu_attention_forward(original: object) -> object:
                 else value.view(-1, self.num_kv_heads, self.v_head_dim)
             )
 
+            # Record NT hit directly from forward context so that we don't
+            # depend on unified_attention_with_output being our patched version.
+            # (The patch on that function may be silently skipped in the
+            # EngineCore subprocess if vllm_mlu.attention.layer wasn't
+            # importable yet at ensure_registered() time.)
+            try:
+                forward_context = layer_mod.get_forward_context()
+                attn_metadata_raw = forward_context.attn_metadata
+                if isinstance(attn_metadata_raw, dict):
+                    common_meta = attn_metadata_raw.get("common_metadata")
+                    if common_meta is not None:
+                        num_actual = int(common_meta.num_actual_tokens)
+                        if num_actual > 0:
+                            is_pf = getattr(common_meta, "is_prefill_only", False) or getattr(
+                                common_meta, "is_chunked", False
+                            )
+                            _record_hit(
+                                "PagedAttentionPrefill" if is_pf else "PagedAttentionDecode",
+                                query,
+                            )
+                else:
+                    # V0 metadata object
+                    num_prefills = getattr(attn_metadata_raw, "num_prefills", None)
+                    if num_prefills is not None and int(num_prefills) > 0:
+                        _record_hit("PagedAttentionPrefill", query)
+                    else:
+                        _record_hit("PagedAttentionDecode", query)
+            except Exception as _hit_exc:
+                _log_once(
+                    "debug",
+                    "hit_record_failed:mlu_attention_forward",
+                    "vllm-nt: hit recording in Attention.forward failed: %s",
+                    _hit_exc,
+                )
+
             attn_output_list = layer_mod.unified_attention_with_output(
                 query_reshaped,
                 key_reshaped,
