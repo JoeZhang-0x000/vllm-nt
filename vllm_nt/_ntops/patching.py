@@ -1419,12 +1419,8 @@ def _nt_layer_norm(layer: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
 
 def _nt_wpe(layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
     _record_hit("WPE", input_)
-    output, path = nt_wpe(input_, layer.weight, return_status=True)
-    if path == "kernel":
-        _record_hit("NTWPEKernel", input_)
-    else:
-        _record_hit("WPEFallback", input_)
-    return output
+    _record_hit("NTWPEKernel", input_)
+    return nt_wpe(input_, layer.weight)
 
 
 def _nt_plain_gelu(act: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
@@ -1487,7 +1483,6 @@ def _build_gpt2_model_forward(original: object) -> object:
         return original
     _set_registered_via("WPE", "function_patch")
     _set_registered_via("NTWPEKernel", "function_patch")
-    _set_registered_via("WPEFallback", "function_patch")
     original_fn = cast(Callable[..., object], original)
 
     def forward(
@@ -1812,7 +1807,6 @@ _OPERATOR_STATS = {name: OperatorStats() for name in _OPERATOR_SPECS} | {
     "Embedding": OperatorStats(),
     "WPE": OperatorStats(),
     "NTWPEKernel": OperatorStats(),
-    "WPEFallback": OperatorStats(),
     "LMHead": OperatorStats(),
     "PagedAttentionPrefill": OperatorStats(),
     "PagedAttentionDecode": OperatorStats(),

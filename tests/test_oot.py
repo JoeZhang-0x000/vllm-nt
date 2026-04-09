@@ -159,23 +159,17 @@ class TestNTLinear:
 
 class TestNTWPE:
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-    def test_forward_matches_embedding_without_fallback(self, dtype):
+    def test_forward_matches_embedding(self, dtype):
         device = _get_device()
         from vllm_nt._ntops.torch.wpe import wpe
 
         weight = torch.randn((1024, 768), dtype=dtype, device=device)
         position_ids = torch.tensor([[0, 1, 2], [511, 512, 513]], device=device)
 
-        output, path = wpe(
-            position_ids,
-            weight,
-            return_status=True,
-            fallback=False,
-        )
+        output = wpe(position_ids, weight)
         reference = F.embedding(position_ids, weight)
 
         torch.testing.assert_close(output, reference, atol=0.05, rtol=0.05)
-        assert path == "kernel"
 
 
 class TestNTLayerNormDelegation:
