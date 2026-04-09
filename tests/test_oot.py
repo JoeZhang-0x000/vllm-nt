@@ -166,7 +166,12 @@ class TestNTWPE:
         weight = torch.randn((1024, 768), dtype=dtype, device=device)
         position_ids = torch.tensor([[0, 1, 2], [511, 512, 513]], device=device)
 
-        output, path = wpe(position_ids, weight, return_status=True)
+        output, path = wpe(
+            position_ids,
+            weight,
+            return_status=True,
+            fallback=False,
+        )
         reference = F.embedding(position_ids, weight)
 
         torch.testing.assert_close(output, reference, atol=0.05, rtol=0.05)

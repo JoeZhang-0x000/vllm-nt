@@ -11,6 +11,7 @@ def wpe(
     block_size_t: int = 64,
     block_size_h: int = 64,
     return_status: bool = False,
+    fallback: bool = True,
 ) -> torch.Tensor | tuple[torch.Tensor, str]:
     flat_positions = positions.reshape(-1, 1)
     output = torch.empty(
@@ -28,6 +29,8 @@ def wpe(
             block_size_h=block_size_h,
         )(flat_positions, weight, output)
     except Exception:
+        if not fallback:
+            raise
         fallback = F.embedding(positions, weight)
         return (fallback, "fallback") if return_status else fallback
     result = output.reshape(*positions.shape, weight.shape[-1])
