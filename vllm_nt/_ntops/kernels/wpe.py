@@ -16,25 +16,22 @@ def arrangement(
     BLOCK_SIZE_H=BLOCK_SIZE_H,
 ):
     output_arranged = output.tile((BLOCK_SIZE_T, BLOCK_SIZE_H))
-    positions_arranged = positions.tile((BLOCK_SIZE_T, 1)).expand(
-        (-1, output_arranged.shape[1])
-    )
-    weight_arranged = weight.tile((-1, BLOCK_SIZE_H)).expand(
-        (output_arranged.shape[0], -1)
-    )
+    positions_arranged = positions.tile((-1, -1)).expand(output_arranged.shape)
+    weight_arranged = weight.tile((-1, -1)).expand(output_arranged.shape)
     return positions_arranged, weight_arranged, output_arranged
 
 
 def application(positions, weight, output):
-    for i in range(output.shape[0]):
-        valid_token = positions[i].offsets(-2) < positions.source.shape[-2]
-        position = positions[i][0]
-        valid_hidden = weight[position].offsets(-1) < weight.source.shape[-1]
-        output[i] = ntl.where(
-            valid_token,
-            ntl.where(valid_hidden, weight[position], 0),
-            0,
-        )  # noqa: F841
+    token_offsets = output.offsets(0)[:, None]
+    hidden_offsets = output.offsets(1)[None, :]
+    valid_token = token_offsets < positions.source.shape[0]
+    valid_hidden = hidden_offsets < weight.source.shape[1]
+    position = positions.source[token_offsets, 0]
+    output = ntl.where(  # noqa: F841
+        valid_token,
+        ntl.where(valid_hidden, weight.source[position, hidden_offsets], 0),
+        0,
+    )
 
 
 def premake(
