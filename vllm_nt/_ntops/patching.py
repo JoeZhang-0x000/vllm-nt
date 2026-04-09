@@ -1262,7 +1262,6 @@ def _build_apply_top_k_top_p_patch(original: object) -> object:
     ):
         if k is not None or p is not None:
             _record_hit("TopKTopP", logits)
-            _record_hit("NTTopKTopP", logits)
         return nt_apply_top_k_top_p(logits, k, p)
 
     return _mark_function_patch(wrapped, "TopKTopP")
@@ -1274,7 +1273,6 @@ def _build_random_sample_patch(original: object) -> object:
 
     def wrapped(probs: torch.Tensor, generators: dict[int, torch.Generator]):
         _record_hit("RandomSample", probs)
-        _record_hit("NTRandomSample", probs)
         return nt_random_sample(probs, generators)
 
     return _mark_function_patch(wrapped, "RandomSample")
@@ -1329,7 +1327,6 @@ def _build_mlu_apply_topkp_v2_patch(original: object) -> object:
         true_select_len: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         _record_hit("TopKTopP", logits)
-        _record_hit("NTTopKTopP", logits)
 
         filtered = logits.to(torch.float32).clone()
         temperature = temperature_list.to(device=filtered.device, dtype=filtered.dtype)
@@ -1378,7 +1375,6 @@ def _build_mlu_random_sample_patch(original: object) -> object:
 
     def wrapped(probs: torch.Tensor, generators: dict[int, torch.Generator]):
         _record_hit("RandomSample", probs)
-        _record_hit("NTRandomSample", probs)
         return nt_random_sample(probs, generators)
 
     return _mark_function_patch(wrapped, "RandomSample")
@@ -1781,7 +1777,6 @@ _OPERATOR_STATS = {name: OperatorStats() for name in _OPERATOR_SPECS} | {
     "LayerNorm": OperatorStats(),
     "MatMul": OperatorStats(),
     "Embedding": OperatorStats(),
-    "NTEmbeddingKernel": OperatorStats(),
     "WPE": OperatorStats(),
     "NTWPEKernel": OperatorStats(),
     "LMHead": OperatorStats(),
@@ -1790,9 +1785,7 @@ _OPERATOR_STATS = {name: OperatorStats() for name in _OPERATOR_SPECS} | {
     "RoPE": OperatorStats(),
     "SDPA": OperatorStats(),
     "TopKTopP": OperatorStats(),
-    "NTTopKTopP": OperatorStats(),
     "RandomSample": OperatorStats(),
-    "NTRandomSample": OperatorStats(),
     "RejectionSample": OperatorStats(),
 }
 _FUNCTION_PATCH_SPECS_BASE: tuple[FunctionPatchSpec, ...] = (
@@ -2090,7 +2083,6 @@ def _nt_unquantized_embedding(
     self, layer: torch.nn.Module, input_: torch.Tensor
 ) -> torch.Tensor:
     _record_hit("Embedding", input_)
-    _record_hit("NTEmbeddingKernel", input_)
     return embedding(layer, input_)
 
 
@@ -2114,7 +2106,6 @@ def _patch_leaf_methods() -> None:
     _set_registered_via("MatMul", "monkey_patch")
     UnquantizedEmbeddingMethod.embedding = _nt_unquantized_embedding
     _set_registered_via("Embedding", "monkey_patch")
-    _set_registered_via("NTEmbeddingKernel", "monkey_patch")
     UnquantizedEmbeddingMethod.apply = _nt_unquantized_embedding_apply
     _set_registered_via("LMHead", "monkey_patch")
 
@@ -2145,10 +2136,6 @@ def _apply_function_patches() -> None:
                     _set_registered_via("PagedAttentionDecode", "function_patch")
                 elif spec.patch_id in _OPERATOR_STATS:
                     _set_registered_via(spec.patch_id, "function_patch")
-                    if spec.patch_id == "TopKTopP":
-                        _set_registered_via("NTTopKTopP", "function_patch")
-                    elif spec.patch_id == "RandomSample":
-                        _set_registered_via("NTRandomSample", "function_patch")
             except Exception as exc:
                 if spec.required:
                     raise
