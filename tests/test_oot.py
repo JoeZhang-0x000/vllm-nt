@@ -1,5 +1,8 @@
 """Tests for NineToothed OOT layer overrides."""
 
+import sys
+from types import ModuleType
+
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -152,3 +155,45 @@ class TestNTLinear:
         reference = F.linear(x, weight, bias)
 
         torch.testing.assert_close(output, reference, atol=0.05, rtol=0.05)
+
+
+class TestNTLayerNormDelegation:
+    def test_layer_norm_prefers_ntops_torch(self, monkeypatch):
+        from vllm_nt._ntops.torch.layer_norm import layer_norm
+
+        fake_ntops = ModuleType("ntops")
+        fake_torch = ModuleType("ntops.torch")
+        sentinel = torch.randn((2, 4), dtype=torch.float32)
+
+        def fake_layer_norm(input, normalized_shape, weight=None, bias=None, eps=1e-5):
+            return sentinel
+
+        fake_torch.layer_norm = fake_layer_norm
+        fake_ntops.torch = fake_torch
+        monkeypatch.setitem(sys.modules, "ntops", fake_ntops)
+        monkeypatch.setitem(sys.modules, "ntops.torch", fake_torch)
+
+        out = layer_norm(torch.randn((2, 4)), (4,))
+
+        assert out is sentinel
+
+    def test_torch_namespace_delegates_missing_ops(self, monkeypatch):
+        import vllm_nt._ntops.torch as nt_torch
+
+        fake_ntops = ModuleType("ntops")
+        fake_torch = ModuleType("ntops.torch")
+
+        def fake_relu(x):
+            return ("relu", x)
+
+        def fake_softmax(x, dim=-1):
+            return ("softmax", x, dim)
+
+        fake_torch.relu = fake_relu
+        fake_torch.softmax = fake_softmax
+        fake_ntops.torch = fake_torch
+        monkeypatch.setitem(sys.modules, "ntops", fake_ntops)
+        monkeypatch.setitem(sys.modules, "ntops.torch", fake_torch)
+
+        assert nt_torch.relu("x") == ("relu", "x")
+        assert nt_torch.softmax("x", dim=1) == ("softmax", "x", 1)

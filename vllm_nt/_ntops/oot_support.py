@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-import importlib
 from typing import Callable
 
 import torch
@@ -14,6 +13,7 @@ from vllm_nt._ntops.torch.attention import (
 from vllm_nt._ntops.torch.kv_cache import store_kvcache as nt_store_kvcache
 from vllm_nt._ntops.torch.kv_cache import get_kv_from_cache as nt_get_kv_from_cache
 from vllm_nt._ntops.torch import linear as nt_linear
+from vllm_nt._ntops.torch import layer_norm as nt_layer_norm
 from vllm_nt._ntops.torch.rotary_emb import apply_rotary_emb as nt_apply_rotary_emb
 from vllm_nt._ntops.torch import rms_norm as nt_rms_norm
 from vllm_nt._ntops.torch.sdpa import (
@@ -75,27 +75,13 @@ def layer_norm(
     bias: torch.Tensor | None = None,
     eps: float = 1e-5,
 ) -> torch.Tensor:
-    if isinstance(normalized_shape, int):
-        normalized_shape = (normalized_shape,)
-    else:
-        normalized_shape = tuple(normalized_shape)
-
-    try:
-        return importlib.import_module("ntops.torch").layer_norm(
-            input,
-            normalized_shape,
-            weight=weight,
-            bias=bias,
-            eps=eps,
-        )
-    except Exception:
-        return F.layer_norm(
-            input,
-            normalized_shape,
-            weight,
-            bias,
-            eps,
-        )
+    return nt_layer_norm(
+        input,
+        normalized_shape,
+        weight=weight,
+        bias=bias,
+        eps=eps,
+    )
 
 
 def paged_attention_prefill(
