@@ -1416,6 +1416,11 @@ def _nt_layer_norm(layer: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
     return layer_norm(x, normalized_shape, weight, bias, eps)
 
 
+def _nt_wpe(layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
+    _record_hit("WPE", input_)
+    return F.embedding(input_, layer.weight)
+
+
 def _nt_plain_gelu(act: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
     _record_hit("GELU", x)
     act_name = type(act).__name__
@@ -1474,6 +1479,7 @@ def _build_gpt2_block_forward(original: object) -> object:
 def _build_gpt2_model_forward(original: object) -> object:
     if _is_function_patch(original, "LayerNorm"):
         return original
+    _set_registered_via("WPE", "function_patch")
     original_fn = cast(Callable[..., object], original)
 
     def forward(
@@ -1489,7 +1495,7 @@ def _build_gpt2_model_forward(original: object) -> object:
             if pp_group.is_first_rank:
                 if inputs_embeds is None:
                     inputs_embeds = self.embed_input_ids(input_ids)
-                position_embeds = self.wpe(position_ids)
+                position_embeds = _nt_wpe(self.wpe, position_ids)
                 hidden_states = inputs_embeds + position_embeds
             else:
                 assert intermediate_tensors is not None
@@ -1796,6 +1802,7 @@ _OPERATOR_STATS = {name: OperatorStats() for name in _OPERATOR_SPECS} | {
     "LayerNorm": OperatorStats(),
     "MatMul": OperatorStats(),
     "Embedding": OperatorStats(),
+    "WPE": OperatorStats(),
     "LMHead": OperatorStats(),
     "PagedAttentionPrefill": OperatorStats(),
     "PagedAttentionDecode": OperatorStats(),

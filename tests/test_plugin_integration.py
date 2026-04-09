@@ -159,6 +159,7 @@ class TestPluginRegistration:
         assert "LayerNorm" in summary["registered_ops"]
         assert "MatMul" in summary["registered_ops"]
         assert "Embedding" in summary["registered_ops"]
+        assert "WPE" in summary["registered_ops"]
         assert "LMHead" in summary["registered_ops"]
         assert set(summary["missed_ops"]) == set(summary["registered_ops"])
         assert all(
@@ -406,6 +407,28 @@ class TestPluginRegistration:
             torch.nn.functional.layer_norm(x, (4,), torch.ones(4), torch.zeros(4), 1e-5),
         )
         assert summary["operators"]["LayerNorm"]["hits"] == 1
+
+    def test_nt_wpe_uses_native_embedding_path(self):
+        _require_runtime()
+        import torch
+
+        from vllm_nt.oot import _reset_usage_state, get_usage_summary
+        import vllm_nt._ntops.patching as patching
+
+        class DummyWPE(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = torch.arange(40, dtype=torch.float32).reshape(10, 4)
+
+        _reset_usage_state()
+        position_ids = torch.tensor([[0, 1], [2, 3]])
+        out = patching._nt_wpe(DummyWPE(), position_ids)
+        summary = cast(dict[str, Any], get_usage_summary())
+
+        torch.testing.assert_close(
+            out, torch.nn.functional.embedding(position_ids, DummyWPE().weight)
+        )
+        assert summary["operators"]["WPE"]["hits"] == 1
 
     def test_mlu_active_patch_tracks_gated_silu_hits(self):
         _require_runtime()
