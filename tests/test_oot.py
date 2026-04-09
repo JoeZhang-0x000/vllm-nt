@@ -197,3 +197,24 @@ class TestNTLayerNormDelegation:
 
         assert nt_torch.relu("x") == ("relu", "x")
         assert nt_torch.softmax("x", dim=1) == ("softmax", "x", 1)
+
+
+class TestNTGeluDelegation:
+    def test_gelu_prefers_ntops_torch(self, monkeypatch):
+        from vllm_nt._ntops.torch.gelu import gelu
+
+        fake_ntops = ModuleType("ntops")
+        fake_torch = ModuleType("ntops.torch")
+        sentinel = torch.randn((2, 4), dtype=torch.float32)
+
+        def fake_gelu(input, approximate="tanh"):
+            return sentinel
+
+        fake_torch.gelu = fake_gelu
+        fake_ntops.torch = fake_torch
+        monkeypatch.setitem(sys.modules, "ntops", fake_ntops)
+        monkeypatch.setitem(sys.modules, "ntops.torch", fake_torch)
+
+        out = gelu(torch.randn((2, 4)), approximate="tanh")
+
+        assert out is sentinel

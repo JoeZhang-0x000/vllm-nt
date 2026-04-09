@@ -1,12 +1,13 @@
-import torch
+import importlib
 
-from vllm_nt._ntops.kernels import gelu as gelu_kernel
-from vllm_nt._ntops.torch.utils import _cached_make
+import torch
+import torch.nn.functional as F
 
 
 def gelu(input, approximate="tanh"):
-    if approximate != "tanh":
-        raise NotImplementedError("nt gelu currently supports only approximate='tanh'")
-    output = torch.empty_like(input)
-    _cached_make(gelu_kernel.premake, input.ndim)(input, output)
-    return output
+    try:
+        return importlib.import_module("ntops.torch").gelu(
+            input, approximate=approximate
+        )
+    except Exception:
+        return F.gelu(input, approximate=approximate)
