@@ -1427,6 +1427,22 @@ def _build_qwen2_mlp_forward(original: object) -> object:
     return _mark_function_patch(forward, "SiluAndMul")
 
 
+def _build_mlu_active_patch(original: object) -> object:
+    if _is_function_patch(original, "SiluAndMul"):
+        return original
+    original_fn = cast(Callable[..., object], original)
+
+    def wrapped(input: torch.Tensor, act_mode: str, is_gated: bool):
+        if is_gated:
+            if act_mode == "silu":
+                _record_hit("SiluAndMul", input)
+            elif act_mode == "gelu":
+                _record_hit("GeluAndMul", input)
+        return original_fn(input, act_mode, is_gated)
+
+    return _mark_function_patch(wrapped, "SiluAndMul")
+
+
 def _build_sdpa_patch(original: object) -> object:
     if _is_function_patch(original, "SDPA"):
         return original
@@ -1789,6 +1805,13 @@ _FUNCTION_PATCH_SPECS_BASE: tuple[FunctionPatchSpec, ...] = (
         attr_name="forward",
         required=False,
         builder=_build_qwen2_mlp_forward,
+    ),
+    FunctionPatchSpec(
+        patch_id="SiluAndMul",
+        module_path="vllm_mlu._mlu_ops",
+        attr_name="active",
+        required=False,
+        builder=_build_mlu_active_patch,
     ),
     FunctionPatchSpec(
         patch_id="TopKTopP",

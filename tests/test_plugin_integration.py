@@ -298,6 +298,26 @@ class TestPluginRegistration:
         assert out.shape == (1, 4)
         assert summary["operators"]["SiluAndMul"]["hits"] == 1
 
+    def test_mlu_active_patch_tracks_gated_silu_hits(self):
+        _require_runtime()
+        import torch
+        import vllm_nt._ntops.patching as patching
+
+        _reset_usage_state = patching._reset_usage_state
+        get_usage_summary = patching.get_usage_summary
+
+        _reset_usage_state()
+        wrapped = patching._build_mlu_active_patch(
+            lambda input, act_mode, is_gated: input
+        )
+
+        x = torch.arange(8, dtype=torch.float32).reshape(1, 8)
+        out = wrapped(x, "silu", True)
+        summary = cast(dict[str, Any], get_usage_summary())
+
+        assert out is x
+        assert summary["operators"]["SiluAndMul"]["hits"] == 1
+
     def test_optional_ops_are_registered_in_summary_when_available(self):
         _require_runtime()
         from vllm.model_executor.layers import activation, layernorm
