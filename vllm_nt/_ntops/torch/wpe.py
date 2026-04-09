@@ -10,7 +10,8 @@ def wpe(
     weight: torch.Tensor,
     block_size_t: int = 64,
     block_size_h: int = 64,
-) -> torch.Tensor:
+    return_status: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, str]:
     flat_positions = positions.reshape(-1, 1)
     output = torch.empty(
         (flat_positions.shape[0], weight.shape[-1]),
@@ -27,5 +28,7 @@ def wpe(
             block_size_h=block_size_h,
         )(flat_positions, weight, output)
     except Exception:
-        return F.embedding(positions, weight)
-    return output.reshape(*positions.shape, weight.shape[-1])
+        fallback = F.embedding(positions, weight)
+        return (fallback, "fallback") if return_status else fallback
+    result = output.reshape(*positions.shape, weight.shape[-1])
+    return (result, "kernel") if return_status else result

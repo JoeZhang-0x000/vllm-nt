@@ -160,6 +160,8 @@ class TestPluginRegistration:
         assert "MatMul" in summary["registered_ops"]
         assert "Embedding" in summary["registered_ops"]
         assert "WPE" in summary["registered_ops"]
+        assert "NTWPEKernel" in summary["registered_ops"]
+        assert "WPEFallback" in summary["registered_ops"]
         assert "LMHead" in summary["registered_ops"]
         assert set(summary["missed_ops"]) == set(summary["registered_ops"])
         assert all(
@@ -408,7 +410,7 @@ class TestPluginRegistration:
         )
         assert summary["operators"]["LayerNorm"]["hits"] == 1
 
-    def test_nt_wpe_uses_native_embedding_path(self, monkeypatch):
+    def test_nt_wpe_tracks_kernel_path(self, monkeypatch):
         _require_runtime()
         import torch
 
@@ -422,7 +424,12 @@ class TestPluginRegistration:
 
         monkeypatch.setattr(
             "vllm_nt._ntops.patching.nt_wpe",
-            lambda positions, weight: torch.nn.functional.embedding(positions, weight),
+            lambda positions, weight, return_status=False: (
+                torch.nn.functional.embedding(positions, weight),
+                "kernel",
+            )
+            if return_status
+            else torch.nn.functional.embedding(positions, weight),
         )
 
         _reset_usage_state()
@@ -434,6 +441,42 @@ class TestPluginRegistration:
             out, torch.nn.functional.embedding(position_ids, DummyWPE().weight)
         )
         assert summary["operators"]["WPE"]["hits"] == 1
+        assert summary["operators"]["NTWPEKernel"]["hits"] == 1
+        assert summary["operators"]["WPEFallback"]["hits"] == 0
+
+    def test_nt_wpe_tracks_fallback_path(self, monkeypatch):
+        _require_runtime()
+        import torch
+
+        from vllm_nt.oot import _reset_usage_state, get_usage_summary
+        import vllm_nt._ntops.patching as patching
+
+        class DummyWPE(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = torch.arange(40, dtype=torch.float32).reshape(10, 4)
+
+        monkeypatch.setattr(
+            "vllm_nt._ntops.patching.nt_wpe",
+            lambda positions, weight, return_status=False: (
+                torch.nn.functional.embedding(positions, weight),
+                "fallback",
+            )
+            if return_status
+            else torch.nn.functional.embedding(positions, weight),
+        )
+
+        _reset_usage_state()
+        position_ids = torch.tensor([[0, 1], [2, 3]])
+        out = patching._nt_wpe(DummyWPE(), position_ids)
+        summary = cast(dict[str, Any], get_usage_summary())
+
+        torch.testing.assert_close(
+            out, torch.nn.functional.embedding(position_ids, DummyWPE().weight)
+        )
+        assert summary["operators"]["WPE"]["hits"] == 1
+        assert summary["operators"]["NTWPEKernel"]["hits"] == 0
+        assert summary["operators"]["WPEFallback"]["hits"] == 1
 
     def test_mlu_active_patch_tracks_gated_silu_hits(self):
         _require_runtime()
