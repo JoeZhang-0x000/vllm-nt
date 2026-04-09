@@ -1406,6 +1406,79 @@ def _build_mlu_random_sample_patch(original: object) -> object:
     return _mark_function_patch(wrapped, "RandomSample")
 
 
+def _nt_layer_norm(layer: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
+    _record_hit("LayerNorm", x)
+    normalized_shape = getattr(layer, "normalized_shape", x.shape[-1:])
+    if isinstance(normalized_shape, int):
+        normalized_shape = (normalized_shape,)
+    weight = getattr(layer, "weight", None)
+    bias = getattr(layer, "bias", None)
+    eps = getattr(layer, "eps", 1e-5)
+    return F.layer_norm(x, normalized_shape, weight, bias, eps)
+
+
+def _build_gpt2_block_forward(original: object) -> object:
+    if _is_function_patch(original, "LayerNorm"):
+        return original
+    original_fn = cast(Callable[..., object], original)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        try:
+            residual = hidden_states
+            hidden_states = _nt_layer_norm(self.ln_1, hidden_states)
+            attn_output = self.attn(hidden_states=hidden_states)
+            hidden_states = attn_output + residual
+
+            residual = hidden_states
+            hidden_states = _nt_layer_norm(self.ln_2, hidden_states)
+            feed_forward_hidden_states = self.mlp(hidden_states)
+            hidden_states = residual + feed_forward_hidden_states
+            return hidden_states
+        except Exception:
+            return original_fn(self, hidden_states)
+
+    return _mark_function_patch(forward, "LayerNorm")
+
+
+def _build_gpt2_model_forward(original: object) -> object:
+    if _is_function_patch(original, "LayerNorm"):
+        return original
+    original_fn = cast(Callable[..., object], original)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        position_ids: torch.Tensor,
+        intermediate_tensors,
+        inputs_embeds: torch.Tensor | None,
+    ):
+        try:
+            gpt2_mod = importlib.import_module("vllm.model_executor.models.gpt2")
+            pp_group = gpt2_mod.get_pp_group()
+            if pp_group.is_first_rank:
+                if inputs_embeds is None:
+                    inputs_embeds = self.embed_input_ids(input_ids)
+                position_embeds = self.wpe(position_ids)
+                hidden_states = inputs_embeds + position_embeds
+            else:
+                assert intermediate_tensors is not None
+                hidden_states = intermediate_tensors["hidden_states"]
+
+            for layer in gpt2_mod.islice(self.h, self.start_layer, self.end_layer):
+                hidden_states = layer(hidden_states)
+
+            if not pp_group.is_last_rank:
+                return gpt2_mod.IntermediateTensors({"hidden_states": hidden_states})
+
+            return _nt_layer_norm(self.ln_f, hidden_states)
+        except Exception:
+            return original_fn(
+                self, input_ids, position_ids, intermediate_tensors, inputs_embeds
+            )
+
+    return _mark_function_patch(forward, "LayerNorm")
+
+
 def _build_qwen2_mlp_forward(original: object) -> object:
     if _is_function_patch(original, "SiluAndMul"):
         return original
@@ -1688,6 +1761,7 @@ for name, cls, forward in (
     if cls is not None:
         _OPERATOR_SPECS[name] = (cls, forward)
 _OPERATOR_STATS = {name: OperatorStats() for name in _OPERATOR_SPECS} | {
+    "LayerNorm": OperatorStats(),
     "MatMul": OperatorStats(),
     "Embedding": OperatorStats(),
     "LMHead": OperatorStats(),
@@ -1798,6 +1872,22 @@ _FUNCTION_PATCH_SPECS_BASE: tuple[FunctionPatchSpec, ...] = (
         attr_name="forward_oot",
         required=False,
         builder=_build_mlu_deepseek_rotary_forward_oot,
+    ),
+    FunctionPatchSpec(
+        patch_id="LayerNorm",
+        module_path="vllm.model_executor.models.gpt2",
+        object_name="GPT2Block",
+        attr_name="forward",
+        required=False,
+        builder=_build_gpt2_block_forward,
+    ),
+    FunctionPatchSpec(
+        patch_id="LayerNorm",
+        module_path="vllm.model_executor.models.gpt2",
+        object_name="GPT2Model",
+        attr_name="forward",
+        required=False,
+        builder=_build_gpt2_model_forward,
     ),
     FunctionPatchSpec(
         patch_id="SiluAndMul",

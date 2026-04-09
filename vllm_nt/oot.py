@@ -3,6 +3,7 @@ from ._ntops.patching import (
     _OPERATOR_SPECS,
     _nt_gelu_and_mul_forward,
     _nt_gemma_rms_norm_forward,
+    _nt_layer_norm,
     _nt_mul_and_silu_forward,
     _nt_rms_norm_forward,
     _nt_silu_and_mul_forward,

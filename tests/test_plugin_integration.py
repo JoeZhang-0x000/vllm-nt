@@ -155,6 +155,7 @@ class TestPluginRegistration:
         summary = cast(dict[str, Any], get_usage_summary())
 
         assert set(_OPERATOR_SPECS).issubset(set(summary["registered_ops"]))
+        assert "LayerNorm" in summary["registered_ops"]
         assert "MatMul" in summary["registered_ops"]
         assert "Embedding" in summary["registered_ops"]
         assert "LMHead" in summary["registered_ops"]
@@ -302,6 +303,65 @@ class TestPluginRegistration:
 
         assert out.shape == (1, 4)
         assert summary["operators"]["SiluAndMul"]["hits"] == 1
+
+    def test_gpt2_block_patch_tracks_layer_norm_hits(self):
+        _require_runtime()
+        import torch
+        import vllm_nt._ntops.patching as patching
+
+        _reset_usage_state = patching._reset_usage_state
+        get_usage_summary = patching.get_usage_summary
+
+        class DummyLayerNorm(torch.nn.Module):
+            def __init__(self, dim: int):
+                super().__init__()
+                self.normalized_shape = (dim,)
+                self.weight = torch.ones(dim)
+                self.bias = torch.zeros(dim)
+                self.eps = 1e-5
+
+        class DummyBlock:
+            def __init__(self):
+                self.ln_1 = DummyLayerNorm(4)
+                self.ln_2 = DummyLayerNorm(4)
+                self.attn = lambda hidden_states: hidden_states + 1
+                self.mlp = lambda hidden_states: hidden_states + 2
+
+        _reset_usage_state()
+        wrapped = patching._build_gpt2_block_forward(
+            lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected fallback"))
+        )
+
+        out = wrapped(DummyBlock(), torch.ones(2, 4))
+        summary = cast(dict[str, Any], get_usage_summary())
+
+        assert out.shape == (2, 4)
+        assert summary["operators"]["LayerNorm"]["hits"] == 2
+
+    def test_nt_layer_norm_uses_plugin_path(self):
+        _require_runtime()
+        import torch
+
+        from vllm_nt.oot import _nt_layer_norm, _reset_usage_state, get_usage_summary
+
+        class DummyLayerNorm(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.normalized_shape = (4,)
+                self.weight = torch.ones(4)
+                self.bias = torch.zeros(4)
+                self.eps = 1e-5
+
+        _reset_usage_state()
+        x = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+        out = _nt_layer_norm(DummyLayerNorm(), x)
+        summary = cast(dict[str, Any], get_usage_summary())
+
+        torch.testing.assert_close(
+            out,
+            torch.nn.functional.layer_norm(x, (4,), torch.ones(4), torch.zeros(4), 1e-5),
+        )
+        assert summary["operators"]["LayerNorm"]["hits"] == 1
 
     def test_mlu_active_patch_tracks_gated_silu_hits(self):
         _require_runtime()
