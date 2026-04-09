@@ -20,6 +20,7 @@ from vllm_nt._ntops.oot_support import (
     OperatorStats,
     act_and_mul,
     embedding,
+    layer_norm,
     get_kv_from_cache,
     linear,
     norm,
@@ -1409,12 +1410,10 @@ def _build_mlu_random_sample_patch(original: object) -> object:
 def _nt_layer_norm(layer: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
     _record_hit("LayerNorm", x)
     normalized_shape = getattr(layer, "normalized_shape", x.shape[-1:])
-    if isinstance(normalized_shape, int):
-        normalized_shape = (normalized_shape,)
     weight = getattr(layer, "weight", None)
     bias = getattr(layer, "bias", None)
     eps = getattr(layer, "eps", 1e-5)
-    return F.layer_norm(x, normalized_shape, weight, bias, eps)
+    return layer_norm(x, normalized_shape, weight, bias, eps)
 
 
 def _build_gpt2_block_forward(original: object) -> object:

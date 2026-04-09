@@ -338,7 +338,7 @@ class TestPluginRegistration:
         assert out.shape == (2, 4)
         assert summary["operators"]["LayerNorm"]["hits"] == 2
 
-    def test_nt_layer_norm_uses_plugin_path(self):
+    def test_nt_layer_norm_uses_plugin_path(self, monkeypatch):
         _require_runtime()
         import torch
 
@@ -351,6 +351,13 @@ class TestPluginRegistration:
                 self.weight = torch.ones(4)
                 self.bias = torch.zeros(4)
                 self.eps = 1e-5
+
+        monkeypatch.setattr(
+            "vllm_nt._ntops.patching.layer_norm",
+            lambda x, normalized_shape, weight=None, bias=None, eps=1e-5: torch.nn.functional.layer_norm(
+                x, normalized_shape, weight, bias, eps
+            ),
+        )
 
         _reset_usage_state()
         x = torch.arange(8, dtype=torch.float32).reshape(2, 4)
