@@ -1805,6 +1805,7 @@ _OPERATOR_STATS = {name: OperatorStats() for name in _OPERATOR_SPECS} | {
     "LayerNorm": OperatorStats(),
     "MatMul": OperatorStats(),
     "Embedding": OperatorStats(),
+    "NTEmbeddingKernel": OperatorStats(),
     "WPE": OperatorStats(),
     "NTWPEKernel": OperatorStats(),
     "LMHead": OperatorStats(),
@@ -2111,6 +2112,7 @@ def _nt_unquantized_embedding(
     self, layer: torch.nn.Module, input_: torch.Tensor
 ) -> torch.Tensor:
     _record_hit("Embedding", input_)
+    _record_hit("NTEmbeddingKernel", input_)
     return embedding(layer, input_)
 
 
@@ -2134,6 +2136,7 @@ def _patch_leaf_methods() -> None:
     _set_registered_via("MatMul", "monkey_patch")
     UnquantizedEmbeddingMethod.embedding = _nt_unquantized_embedding
     _set_registered_via("Embedding", "monkey_patch")
+    _set_registered_via("NTEmbeddingKernel", "monkey_patch")
     UnquantizedEmbeddingMethod.apply = _nt_unquantized_embedding_apply
     _set_registered_via("LMHead", "monkey_patch")
 
