@@ -1690,6 +1690,7 @@ for name, cls, forward in (
 _OPERATOR_STATS = {name: OperatorStats() for name in _OPERATOR_SPECS} | {
     "MatMul": OperatorStats(),
     "Embedding": OperatorStats(),
+    "LMHead": OperatorStats(),
     "PagedAttentionPrefill": OperatorStats(),
     "PagedAttentionDecode": OperatorStats(),
     "RoPE": OperatorStats(),
@@ -1972,11 +1973,28 @@ def _nt_unquantized_embedding(
     return embedding(layer, input_)
 
 
+def _nt_unquantized_embedding_apply(
+    self,
+    layer: torch.nn.Module,
+    x: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    **kwargs,
+) -> torch.Tensor:
+    _record_hit("LMHead", x)
+    residual = kwargs.get("residual")
+    nt_output = linear(x, layer.weight, bias)
+    if residual is not None:
+        nt_output = nt_output + residual
+    return nt_output
+
+
 def _patch_leaf_methods() -> None:
     UnquantizedLinearMethod.apply = _nt_unquantized_linear_apply
     _set_registered_via("MatMul", "monkey_patch")
     UnquantizedEmbeddingMethod.embedding = _nt_unquantized_embedding
     _set_registered_via("Embedding", "monkey_patch")
+    UnquantizedEmbeddingMethod.apply = _nt_unquantized_embedding_apply
+    _set_registered_via("LMHead", "monkey_patch")
 
 
 def _resolve_function_patch_target(spec: FunctionPatchSpec) -> tuple[object, object]:

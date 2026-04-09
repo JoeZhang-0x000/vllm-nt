@@ -7,6 +7,7 @@ from ._ntops.patching import (
     _nt_rms_norm_forward,
     _nt_silu_and_mul_forward,
     _nt_unquantized_embedding,
+    _nt_unquantized_embedding_apply,
     _nt_unquantized_linear_apply,
     _reset_usage_state,
     ensure_registered,

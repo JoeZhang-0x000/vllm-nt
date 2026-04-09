@@ -134,11 +134,15 @@ class TestPluginRegistration:
         )
 
         from vllm_nt import register
-        from vllm_nt.oot import _nt_unquantized_embedding
+        from vllm_nt.oot import (
+            _nt_unquantized_embedding,
+            _nt_unquantized_embedding_apply,
+        )
 
         register()
 
         assert UnquantizedEmbeddingMethod.embedding == _nt_unquantized_embedding
+        assert UnquantizedEmbeddingMethod.apply == _nt_unquantized_embedding_apply
 
     def test_usage_summary_auto_discovers_registered_ops(self):
         _require_runtime()
@@ -153,6 +157,7 @@ class TestPluginRegistration:
         assert set(_OPERATOR_SPECS).issubset(set(summary["registered_ops"]))
         assert "MatMul" in summary["registered_ops"]
         assert "Embedding" in summary["registered_ops"]
+        assert "LMHead" in summary["registered_ops"]
         assert set(summary["missed_ops"]) == set(summary["registered_ops"])
         assert all(
             details["registered_via"] in {"oot", "monkey_patch", "function_patch", None}
@@ -678,6 +683,37 @@ class TestPluginRegistration:
             out, torch.nn.functional.embedding(input_ids, DummyEmbeddingLayer.weight)
         )
         assert summary["operators"]["Embedding"]["hits"] == 1
+
+    def test_unquantized_embedding_apply_uses_plugin_path(self, monkeypatch):
+        _require_runtime()
+        import torch
+
+        from vllm_nt.oot import (
+            _nt_unquantized_embedding_apply,
+            _reset_usage_state,
+            get_usage_summary,
+        )
+
+        class DummyEmbeddingMethod:
+            pass
+
+        class DummyLMHead:
+            weight = torch.arange(20, dtype=torch.float32).reshape(5, 4)
+
+        monkeypatch.setattr(
+            "vllm_nt._ntops.patching.linear",
+            lambda x, weight, bias=None: x @ weight.T if bias is None else x @ weight.T + bias,
+        )
+
+        _reset_usage_state()
+        hidden_states = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+        out = _nt_unquantized_embedding_apply(
+            DummyEmbeddingMethod(), DummyLMHead(), hidden_states
+        )
+        summary = cast(dict[str, Any], get_usage_summary())
+
+        torch.testing.assert_close(out, hidden_states @ DummyLMHead.weight.T)
+        assert summary["operators"]["LMHead"]["hits"] == 1
 
 
 class TestNoHardwareDependency:
