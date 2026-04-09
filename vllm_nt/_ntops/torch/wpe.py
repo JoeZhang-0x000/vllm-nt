@@ -25,6 +25,9 @@ def wpe(
             positions_dtype=flat_positions.dtype,
             weight_dtype=weight.dtype,
             output_dtype=output.dtype,
+            num_tokens=flat_positions.shape[0],
+            num_positions=weight.shape[0],
+            hidden_size=weight.shape[-1],
             block_size_t=block_size_t,
             block_size_h=block_size_h,
         )(flat_positions, weight, output)
