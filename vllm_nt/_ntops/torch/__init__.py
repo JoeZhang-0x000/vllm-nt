@@ -13,6 +13,7 @@ from vllm_nt._ntops.torch.rotary_emb import apply_rotary_emb
 from vllm_nt._ntops.torch.rms_norm import rms_norm
 from vllm_nt._ntops.torch.sdpa import CausalVariant, scaled_dot_product_attention
 from vllm_nt._ntops.torch.silu import silu
+from vllm_nt._ntops.torch.wpe import wpe
 
 _DELEGATED_NTOPS_EXPORTS = {
     "abs",
@@ -114,4 +115,5 @@ __all__ = [
     "store_kvcache",
     "sub",
     "tanh",
+    "wpe",
 ]

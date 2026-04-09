@@ -33,6 +33,7 @@ from vllm_nt._ntops.oot_support import (
 )
 from vllm_nt._ntops.torch import gelu as nt_gelu
 from vllm_nt._ntops.torch import silu as nt_silu
+from vllm_nt._ntops.torch import wpe as nt_wpe
 
 logger = logging.getLogger("vllm_nt")
 _PARENT_PID_ENV = "VLLM_NT_PARENT_PID"
@@ -1418,7 +1419,7 @@ def _nt_layer_norm(layer: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
 
 def _nt_wpe(layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
     _record_hit("WPE", input_)
-    return F.embedding(input_, layer.weight)
+    return nt_wpe(input_, layer.weight)
 
 
 def _nt_plain_gelu(act: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:

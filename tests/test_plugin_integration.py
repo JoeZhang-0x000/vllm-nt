@@ -408,7 +408,7 @@ class TestPluginRegistration:
         )
         assert summary["operators"]["LayerNorm"]["hits"] == 1
 
-    def test_nt_wpe_uses_native_embedding_path(self):
+    def test_nt_wpe_uses_native_embedding_path(self, monkeypatch):
         _require_runtime()
         import torch
 
@@ -419,6 +419,11 @@ class TestPluginRegistration:
             def __init__(self):
                 super().__init__()
                 self.weight = torch.arange(40, dtype=torch.float32).reshape(10, 4)
+
+        monkeypatch.setattr(
+            "vllm_nt._ntops.patching.nt_wpe",
+            lambda positions, weight: torch.nn.functional.embedding(positions, weight),
+        )
 
         _reset_usage_state()
         position_ids = torch.tensor([[0, 1], [2, 3]])

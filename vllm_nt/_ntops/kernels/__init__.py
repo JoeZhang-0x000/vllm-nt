@@ -8,6 +8,7 @@ from vllm_nt._ntops.kernels import (
     rms_norm,
     sdpa,
     silu,
+    wpe,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "rms_norm",
     "sdpa",
     "silu",
+    "wpe",
 ]
