@@ -12,6 +12,7 @@ from vllm_nt._ntops.torch.linear import linear
 from vllm_nt._ntops.torch.matmul import matmul
 from vllm_nt._ntops.torch.rotary_emb import apply_rotary_emb
 from vllm_nt._ntops.torch.rms_norm import rms_norm
+from vllm_nt._ntops.torch.sampler import apply_top_k_top_p, random_sample
 from vllm_nt._ntops.torch.sdpa import CausalVariant, scaled_dot_product_attention
 from vllm_nt._ntops.torch.silu import silu
 from vllm_nt._ntops.torch.wpe import wpe
@@ -110,6 +111,8 @@ __all__ = [
     "rms_norm",
     "rotary_position_embedding",
     "rsqrt",
+    "apply_top_k_top_p",
+    "random_sample",
     "scaled_dot_product_attention",
     "sigmoid",
     "silu",

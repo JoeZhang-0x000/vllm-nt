@@ -163,6 +163,8 @@ class TestPluginRegistration:
         assert "WPE" in summary["registered_ops"]
         assert "NTWPEKernel" in summary["registered_ops"]
         assert "LMHead" in summary["registered_ops"]
+        assert "NTTopKTopP" in summary["registered_ops"]
+        assert "NTRandomSample" in summary["registered_ops"]
         assert set(summary["missed_ops"]) == set(summary["registered_ops"])
         assert all(
             details["registered_via"] in {"oot", "monkey_patch", "function_patch", None}
@@ -232,6 +234,7 @@ class TestPluginRegistration:
         assert index_out.shape == logits.shape
         assert true_select_len.shape == (logits.shape[0],)
         assert summary["operators"]["TopKTopP"]["hits"] == 1
+        assert summary["operators"]["NTTopKTopP"]["hits"] == 1
 
     def test_mlu_random_sample_patch_tracks_hits(self):
         _require_runtime()
@@ -252,6 +255,7 @@ class TestPluginRegistration:
 
         assert sampled.shape == (2,)
         assert summary["operators"]["RandomSample"]["hits"] == 1
+        assert summary["operators"]["NTRandomSample"]["hits"] == 1
 
     def test_rejection_sample_patch_tracks_hits(self):
         _require_runtime()

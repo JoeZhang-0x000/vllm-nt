@@ -34,6 +34,10 @@ from vllm_nt._ntops.oot_support import (
 from vllm_nt._ntops.torch import gelu as nt_gelu
 from vllm_nt._ntops.torch import silu as nt_silu
 from vllm_nt._ntops.torch import wpe as nt_wpe
+from vllm_nt._ntops.torch.sampler import (
+    apply_top_k_top_p as nt_apply_top_k_top_p,
+)
+from vllm_nt._ntops.torch.sampler import random_sample as nt_random_sample
 
 logger = logging.getLogger("vllm_nt")
 _PARENT_PID_ENV = "VLLM_NT_PARENT_PID"
@@ -1250,7 +1254,6 @@ def _build_mlu_deepseek_rotary_forward_oot(original: object) -> object:
 def _build_apply_top_k_top_p_patch(original: object) -> object:
     if _is_function_patch(original, "TopKTopP"):
         return original
-    original_fn = cast(Callable[..., object], original)
 
     def wrapped(
         logits: torch.Tensor,
@@ -1259,7 +1262,8 @@ def _build_apply_top_k_top_p_patch(original: object) -> object:
     ):
         if k is not None or p is not None:
             _record_hit("TopKTopP", logits)
-        return original_fn(logits, k, p)
+            _record_hit("NTTopKTopP", logits)
+        return nt_apply_top_k_top_p(logits, k, p)
 
     return _mark_function_patch(wrapped, "TopKTopP")
 
@@ -1267,11 +1271,11 @@ def _build_apply_top_k_top_p_patch(original: object) -> object:
 def _build_random_sample_patch(original: object) -> object:
     if _is_function_patch(original, "RandomSample"):
         return original
-    original_fn = cast(Callable[..., object], original)
 
     def wrapped(probs: torch.Tensor, generators: dict[int, torch.Generator]):
         _record_hit("RandomSample", probs)
-        return original_fn(probs, generators)
+        _record_hit("NTRandomSample", probs)
+        return nt_random_sample(probs, generators)
 
     return _mark_function_patch(wrapped, "RandomSample")
 
@@ -1311,7 +1315,6 @@ def _apply_min_p_mask(logits: torch.Tensor, min_p: torch.Tensor | None) -> torch
 def _build_mlu_apply_topkp_v2_patch(original: object) -> object:
     if _is_function_patch(original, "TopKTopP"):
         return original
-    original_fn = cast(Callable[..., object], original)
 
     def wrapped(
         logits: torch.Tensor,
@@ -1326,67 +1329,45 @@ def _build_mlu_apply_topkp_v2_patch(original: object) -> object:
         true_select_len: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         _record_hit("TopKTopP", logits)
-        try:
-            from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p_pytorch
+        _record_hit("NTTopKTopP", logits)
 
-            filtered = logits.to(torch.float32).clone()
-            temperature = temperature_list.to(device=filtered.device, dtype=filtered.dtype)
-            temperature = torch.where(
-                temperature.abs() < 1e-5,
-                torch.ones_like(temperature),
-                temperature,
-            )
-            filtered.div_(temperature.unsqueeze(-1))
-            filtered = _apply_min_p_mask(filtered, minp_list)
-            topk = (
-                None
-                if topk_list is None
-                else topk_list.to(device=filtered.device)
-            )
-            topp = (
-                None
-                if topp_list is None
-                else topp_list.to(device=filtered.device)
-            )
-            filtered = apply_top_k_top_p_pytorch(filtered, topk, topp)
+        filtered = logits.to(torch.float32).clone()
+        temperature = temperature_list.to(device=filtered.device, dtype=filtered.dtype)
+        temperature = torch.where(
+            temperature.abs() < 1e-5,
+            torch.ones_like(temperature),
+            temperature,
+        )
+        filtered.div_(temperature.unsqueeze(-1))
+        filtered = _apply_min_p_mask(filtered, minp_list)
+        topk = None if topk_list is None else topk_list.to(device=filtered.device)
+        topp = None if topp_list is None else topp_list.to(device=filtered.device)
+        filtered = nt_apply_top_k_top_p(filtered, topk, topp)
 
-            sorted_logits, sorted_indices = filtered.sort(dim=-1, descending=True)
-            expanded_index = index_in.to(device=filtered.device, dtype=torch.int64)
-            if expanded_index.ndim == 1:
-                expanded_index = expanded_index.unsqueeze(0).expand(filtered.shape[0], -1)
-            sorted_index = expanded_index.gather(1, sorted_indices)
-            selected = torch.isfinite(filtered).sum(dim=-1)
+        sorted_logits, sorted_indices = filtered.sort(dim=-1, descending=True)
+        expanded_index = index_in.to(device=filtered.device, dtype=torch.int64)
+        if expanded_index.ndim == 1:
+            expanded_index = expanded_index.unsqueeze(0).expand(filtered.shape[0], -1)
+        sorted_index = expanded_index.gather(1, sorted_indices)
+        selected = torch.isfinite(filtered).sum(dim=-1)
 
-            logits_res = filtered if logits_out is None else logits_out.copy_(filtered)
-            sorted_logits_res = (
-                sorted_logits
-                if sorted_logits_out is None
-                else sorted_logits_out.copy_(sorted_logits)
-            )
-            index_res = (
-                sorted_index
-                if index_out is None
-                else index_out.copy_(sorted_index.to(dtype=index_out.dtype))
-            )
-            true_select_len_res = (
-                selected
-                if true_select_len is None
-                else true_select_len.copy_(selected.to(dtype=true_select_len.dtype))
-            )
-            return logits_res, sorted_logits_res, index_res, true_select_len_res
-        except Exception:
-            return original_fn(
-                logits,
-                index_in,
-                temperature_list,
-                minp_list,
-                topk_list,
-                topp_list,
-                logits_out,
-                sorted_logits_out,
-                index_out,
-                true_select_len,
-            )
+        logits_res = filtered if logits_out is None else logits_out.copy_(filtered)
+        sorted_logits_res = (
+            sorted_logits
+            if sorted_logits_out is None
+            else sorted_logits_out.copy_(sorted_logits)
+        )
+        index_res = (
+            sorted_index
+            if index_out is None
+            else index_out.copy_(sorted_index.to(dtype=index_out.dtype))
+        )
+        true_select_len_res = (
+            selected
+            if true_select_len is None
+            else true_select_len.copy_(selected.to(dtype=true_select_len.dtype))
+        )
+        return logits_res, sorted_logits_res, index_res, true_select_len_res
 
     return _mark_function_patch(wrapped, "TopKTopP")
 
@@ -1394,16 +1375,11 @@ def _build_mlu_apply_topkp_v2_patch(original: object) -> object:
 def _build_mlu_random_sample_patch(original: object) -> object:
     if _is_function_patch(original, "RandomSample"):
         return original
-    original_fn = cast(Callable[..., object], original)
 
     def wrapped(probs: torch.Tensor, generators: dict[int, torch.Generator]):
         _record_hit("RandomSample", probs)
-        try:
-            from vllm.v1.sample.ops.topk_topp_sampler import random_sample
-
-            return random_sample(probs, generators)
-        except Exception:
-            return original_fn(probs, generators)
+        _record_hit("NTRandomSample", probs)
+        return nt_random_sample(probs, generators)
 
     return _mark_function_patch(wrapped, "RandomSample")
 
@@ -1814,7 +1790,9 @@ _OPERATOR_STATS = {name: OperatorStats() for name in _OPERATOR_SPECS} | {
     "RoPE": OperatorStats(),
     "SDPA": OperatorStats(),
     "TopKTopP": OperatorStats(),
+    "NTTopKTopP": OperatorStats(),
     "RandomSample": OperatorStats(),
+    "NTRandomSample": OperatorStats(),
     "RejectionSample": OperatorStats(),
 }
 _FUNCTION_PATCH_SPECS_BASE: tuple[FunctionPatchSpec, ...] = (
@@ -2167,6 +2145,10 @@ def _apply_function_patches() -> None:
                     _set_registered_via("PagedAttentionDecode", "function_patch")
                 elif spec.patch_id in _OPERATOR_STATS:
                     _set_registered_via(spec.patch_id, "function_patch")
+                    if spec.patch_id == "TopKTopP":
+                        _set_registered_via("NTTopKTopP", "function_patch")
+                    elif spec.patch_id == "RandomSample":
+                        _set_registered_via("NTRandomSample", "function_patch")
             except Exception as exc:
                 if spec.required:
                     raise
