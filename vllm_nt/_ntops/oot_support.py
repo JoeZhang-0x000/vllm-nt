@@ -12,6 +12,7 @@ from vllm_nt._ntops.torch.attention import (
 )
 from vllm_nt._ntops.torch.kv_cache import store_kvcache as nt_store_kvcache
 from vllm_nt._ntops.torch.kv_cache import get_kv_from_cache as nt_get_kv_from_cache
+from vllm_nt._ntops.torch.embedding import embedding as nt_embedding
 from vllm_nt._ntops.torch import linear as nt_linear
 from vllm_nt._ntops.torch import layer_norm as nt_layer_norm
 from vllm_nt._ntops.torch.rotary_emb import apply_rotary_emb as nt_apply_rotary_emb
@@ -65,7 +66,7 @@ def linear(
 
 
 def embedding(layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
-    return F.embedding(input_, layer.weight)
+    return nt_embedding(input_, layer.weight)
 
 
 def layer_norm(

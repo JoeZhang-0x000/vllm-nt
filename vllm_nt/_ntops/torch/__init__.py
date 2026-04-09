@@ -4,6 +4,7 @@ from vllm_nt._ntops.torch.attention import (
     flash_attn_varlen_func,
     flash_attn_with_kvcache,
 )
+from vllm_nt._ntops.torch.embedding import embedding
 from vllm_nt._ntops.torch.gelu import gelu
 from vllm_nt._ntops.torch.kv_cache import store_kvcache
 from vllm_nt._ntops.torch.layer_norm import layer_norm
@@ -29,6 +30,7 @@ _DELEGATED_NTOPS_EXPORTS = {
     "cos",
     "div",
     "dropout",
+    "embedding",
     "eq",
     "exp",
     "ge",
@@ -83,6 +85,7 @@ __all__ = [
     "cos",
     "div",
     "dropout",
+    "embedding",
     "eq",
     "exp",
     "flash_attn_varlen_func",
