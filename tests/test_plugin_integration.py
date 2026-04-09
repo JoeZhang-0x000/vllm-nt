@@ -155,6 +155,7 @@ class TestPluginRegistration:
         summary = cast(dict[str, Any], get_usage_summary())
 
         assert set(_OPERATOR_SPECS).issubset(set(summary["registered_ops"]))
+        assert "GELU" in summary["registered_ops"]
         assert "LayerNorm" in summary["registered_ops"]
         assert "MatMul" in summary["registered_ops"]
         assert "Embedding" in summary["registered_ops"]
@@ -337,6 +338,42 @@ class TestPluginRegistration:
 
         assert out.shape == (2, 4)
         assert summary["operators"]["LayerNorm"]["hits"] == 2
+
+    def test_gpt2_mlp_patch_tracks_gelu_hits(self):
+        _require_runtime()
+        import torch
+        import vllm_nt._ntops.patching as patching
+
+        _reset_usage_state = patching._reset_usage_state
+        get_usage_summary = patching.get_usage_summary
+
+        class DummyProj:
+            def __init__(self, out: torch.Tensor):
+                self.out = out
+
+            def __call__(self, x: torch.Tensor):
+                return self.out, None
+
+        class DummyNewGELU(torch.nn.Module):
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                return x
+
+        class DummyMLP:
+            def __init__(self):
+                self.c_fc = DummyProj(torch.arange(8, dtype=torch.float32).reshape(2, 4))
+                self.c_proj = DummyProj(torch.arange(8, dtype=torch.float32).reshape(2, 4))
+                self.act = DummyNewGELU()
+
+        _reset_usage_state()
+        wrapped = patching._build_gpt2_mlp_forward(
+            lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected fallback"))
+        )
+
+        out = wrapped(DummyMLP(), torch.ones(2, 4))
+        summary = cast(dict[str, Any], get_usage_summary())
+
+        assert out.shape == (2, 4)
+        assert summary["operators"]["GELU"]["hits"] == 1
 
     def test_nt_layer_norm_uses_plugin_path(self, monkeypatch):
         _require_runtime()

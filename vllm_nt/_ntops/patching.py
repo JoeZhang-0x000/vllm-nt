@@ -1416,6 +1416,38 @@ def _nt_layer_norm(layer: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
     return layer_norm(x, normalized_shape, weight, bias, eps)
 
 
+def _nt_plain_gelu(act: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
+    _record_hit("GELU", x)
+    act_name = type(act).__name__
+    if act_name in {"NewGELU", "FastGELU"}:
+        return nt_gelu(x)
+    if act_name == "QuickGELU":
+        return x * torch.sigmoid(1.702 * x)
+    if isinstance(act, torch.nn.GELU):
+        approximate = getattr(act, "approximate", "none")
+        if approximate == "tanh":
+            return nt_gelu(x)
+        return F.gelu(x, approximate=approximate)
+    return act(x)
+
+
+def _build_gpt2_mlp_forward(original: object) -> object:
+    if _is_function_patch(original, "GELU"):
+        return original
+    original_fn = cast(Callable[..., object], original)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        try:
+            hidden_states, _ = self.c_fc(hidden_states)
+            hidden_states = _nt_plain_gelu(self.act, hidden_states)
+            hidden_states, _ = self.c_proj(hidden_states)
+            return hidden_states
+        except Exception:
+            return original_fn(self, hidden_states)
+
+    return _mark_function_patch(forward, "GELU")
+
+
 def _build_gpt2_block_forward(original: object) -> object:
     if _is_function_patch(original, "LayerNorm"):
         return original
@@ -1760,6 +1792,7 @@ for name, cls, forward in (
     if cls is not None:
         _OPERATOR_SPECS[name] = (cls, forward)
 _OPERATOR_STATS = {name: OperatorStats() for name in _OPERATOR_SPECS} | {
+    "GELU": OperatorStats(),
     "LayerNorm": OperatorStats(),
     "MatMul": OperatorStats(),
     "Embedding": OperatorStats(),
@@ -1887,6 +1920,14 @@ _FUNCTION_PATCH_SPECS_BASE: tuple[FunctionPatchSpec, ...] = (
         attr_name="forward",
         required=False,
         builder=_build_gpt2_model_forward,
+    ),
+    FunctionPatchSpec(
+        patch_id="GELU",
+        module_path="vllm.model_executor.models.gpt2",
+        object_name="GPT2MLP",
+        attr_name="forward",
+        required=False,
+        builder=_build_gpt2_mlp_forward,
     ),
     FunctionPatchSpec(
         patch_id="SiluAndMul",
