@@ -29,10 +29,12 @@ def application(positions, weight, output):
     for i in range(output.shape[0]):
         valid_token = positions[i].offsets(-2) < positions.source.shape[-2]
         position = positions[i][0]
-        row = weight[position]
-        valid_hidden = row.offsets(-1) < weight.source.shape[-1]
-        row = ntl.where(valid_hidden, row, 0)
-        output[i] = ntl.where(valid_token, row, 0)  # noqa: F841
+        valid_hidden = weight[position].offsets(-1) < weight.source.shape[-1]
+        output[i] = ntl.where(
+            valid_token,
+            ntl.where(valid_hidden, weight[position], 0),
+            0,
+        )  # noqa: F841
 
 
 def premake(
