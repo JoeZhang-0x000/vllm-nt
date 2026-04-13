@@ -322,6 +322,8 @@ def _render_report(
         f"- dtype: `{args.dtype}`",
         f"- tensor_parallel_size: `{args.tensor_parallel_size}`",
         f"- gpu_memory_utilization: `{args.gpu_memory_utilization}`",
+        f"- max_num_configs: `{os.environ.get('VLLM_NT_MAX_NUM_CONFIGS', '(mode/default)')}`",
+        f"- max_num_configs_mode: `{os.environ.get('VLLM_NT_MAX_NUM_CONFIGS_MODE', 'quick')}`",
         f"- mlu_visible_devices: `{os.environ.get('MLU_VISIBLE_DEVICES', '(default)')}`",
         "- v1_multiprocessing: `0`",
         f"- accuracy max tokens: `{args.accuracy_max_tokens}`",
@@ -393,6 +395,11 @@ def _render_report(
 
 
 def _run_suite(args: argparse.Namespace) -> None:
+    if args.max_num_configs is not None:
+        os.environ["VLLM_NT_MAX_NUM_CONFIGS"] = str(args.max_num_configs)
+    elif args.max_num_configs_mode is not None:
+        os.environ["VLLM_NT_MAX_NUM_CONFIGS_MODE"] = args.max_num_configs_mode
+
     resolved, missing = resolve_models()
     accuracy_results: dict[str, dict[str, Any]] = {}
     throughput_results: dict[str, dict[str, Any]] = {}
@@ -470,6 +477,12 @@ def build_parser() -> argparse.ArgumentParser:
     suite_parser.add_argument("--throughput-output-len", type=int, default=64)
     suite_parser.add_argument("--warmup-iters", type=int, default=1)
     suite_parser.add_argument("--measure-iters", type=int, default=3)
+    suite_parser.add_argument("--max-num-configs", type=int, default=None)
+    suite_parser.add_argument(
+        "--max-num-configs-mode",
+        choices=["quick", "tuning"],
+        default=None,
+    )
 
     for name in ("accuracy-child", "throughput-child"):
         child_parser = subparsers.add_parser(name)

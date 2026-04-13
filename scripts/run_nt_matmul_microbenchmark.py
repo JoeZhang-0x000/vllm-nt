@@ -147,9 +147,20 @@ def run_benchmarks(args: argparse.Namespace) -> tuple[list[BenchmarkResult], dic
     from vllm_mlu import _mlu_ops as mlu_ops
     from vllm_nt._ntops.torch import linear as nt_linear
     from vllm_nt._ntops.torch import matmul as nt_matmul
+    from vllm_nt._ntops.torch.utils import (
+        get_default_max_num_configs,
+        set_default_max_num_configs,
+        set_default_max_num_configs_mode,
+    )
 
     if not hasattr(torch, "mlu") or not torch.mlu.is_available():
         raise RuntimeError("MLU is not available in this environment")
+
+    if args.max_num_configs is not None:
+        set_default_max_num_configs(args.max_num_configs)
+    elif args.max_num_configs_mode is not None:
+        set_default_max_num_configs_mode(args.max_num_configs_mode)
+    args.effective_max_num_configs = get_default_max_num_configs()
 
     found_models, missing = _find_cached_models()
     selected_models = set(args.models)
@@ -250,6 +261,8 @@ def render_report(
         f"- dtype: `{args.dtype}`",
         f"- warmup: `{args.warmup}`",
         f"- max iters: `{args.iters}`",
+        f"- max_num_configs: `{args.effective_max_num_configs}`",
+        f"- max_num_configs_mode: `{args.max_num_configs_mode or '(explicit/default)'}`",
         f"- rtol/atol: `{args.rtol}` / `{args.atol}`",
         f"- mlu_visible_devices: `{os.environ.get('MLU_VISIBLE_DEVICES', '(default)')}`",
         "- native path: `vllm_mlu._mlu_ops.matmul`",
@@ -317,6 +330,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dtype", choices=sorted(DTYPE_BY_NAME), default="bfloat16")
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=30)
+    parser.add_argument("--max-num-configs", type=int, default=None)
+    parser.add_argument(
+        "--max-num-configs-mode",
+        choices=["quick", "tuning"],
+        default=None,
+    )
     parser.add_argument("--rtol", type=float, default=2e-2)
     parser.add_argument("--atol", type=float, default=2e-2)
     parser.add_argument(
@@ -330,6 +349,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    args.effective_max_num_configs = args.max_num_configs
     results, missing = run_benchmarks(args)
     report = render_report(results, missing, args)
     output_path = REPO_ROOT / args.output

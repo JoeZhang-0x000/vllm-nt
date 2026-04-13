@@ -144,6 +144,7 @@ def main() -> int:
     import vllm_nt  # noqa: F401
     from vllm import LLM, SamplingParams
     from vllm_nt.oot import _FUNCTION_PATCH_SPECS, get_usage_summary
+    from vllm_nt._ntops.torch.utils import get_default_max_num_configs
 
     _print_header("Environment")
     print(f"python={sys.version.split()[0]}")
@@ -166,6 +167,7 @@ def main() -> int:
         "enable_mm="
         f"{os.environ.get('VLLM_NT_ENABLE_MM', '1')}"
     )
+    print(f"max_num_configs={get_default_max_num_configs()}")
     print(
         "experimental_forward_patch="
         f"{os.environ.get('VLLM_NT_ENABLE_EXPERIMENTAL_FORWARD_PATCH', '0')}"
