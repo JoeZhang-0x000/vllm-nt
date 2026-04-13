@@ -144,6 +144,69 @@ class TestPluginRegistration:
         assert UnquantizedEmbeddingMethod.embedding == _nt_unquantized_embedding
         assert UnquantizedEmbeddingMethod.apply == _nt_unquantized_embedding_apply
 
+    def test_feature_toggles_respect_env(self, monkeypatch):
+        _require_runtime()
+        import vllm_nt._ntops.patching as patching
+
+        monkeypatch.delenv("VLLM_NT_ENABLE_ALL", raising=False)
+        monkeypatch.delenv("VLLM_NT_ENABLE_FA", raising=False)
+        monkeypatch.delenv("VLLM_NT_ENABLE_MM", raising=False)
+        assert patching._nt_feature_enabled("FA")
+        assert patching._nt_feature_enabled("MM")
+
+        monkeypatch.setenv("VLLM_NT_ENABLE_FA", "0")
+        assert not patching._nt_feature_enabled("FA")
+        assert patching._nt_feature_enabled("MM")
+
+        monkeypatch.setenv("VLLM_NT_ENABLE_ALL", "0")
+        monkeypatch.setenv("VLLM_NT_ENABLE_FA", "1")
+        monkeypatch.setenv("VLLM_NT_ENABLE_MM", "1")
+        assert not patching._nt_feature_enabled("FA")
+        assert not patching._operator_enabled("RMSNorm")
+
+    def test_mm_toggle_skips_linear_and_lmhead_patches(self, monkeypatch):
+        _require_runtime()
+        import vllm_nt._ntops.patching as patching
+
+        class DummyLinearMethod:
+            apply = object()
+
+        class DummyEmbeddingMethod:
+            embedding = object()
+            apply = object()
+
+        monkeypatch.setattr(patching, "UnquantizedLinearMethod", DummyLinearMethod)
+        monkeypatch.setattr(patching, "UnquantizedEmbeddingMethod", DummyEmbeddingMethod)
+        monkeypatch.setenv("VLLM_NT_ENABLE_MM", "0")
+
+        original_linear_apply = DummyLinearMethod.apply
+        original_embedding_apply = DummyEmbeddingMethod.apply
+        patching._patch_leaf_methods()
+
+        assert DummyLinearMethod.apply is original_linear_apply
+        assert DummyEmbeddingMethod.embedding == patching._nt_unquantized_embedding
+        assert DummyEmbeddingMethod.apply is original_embedding_apply
+
+    def test_fa_toggle_filters_function_patches(self, monkeypatch):
+        _require_runtime()
+        import vllm_nt._ntops.patching as patching
+
+        monkeypatch.setenv("VLLM_NT_ENABLE_FA", "0")
+        disabled = {
+            spec.patch_id
+            for spec in patching._FUNCTION_PATCH_SPECS
+            if not patching._function_patch_enabled(spec)
+        }
+
+        assert "UnifiedAttentionWithOutput" in disabled
+        assert "PagedAttentionPrefill" in disabled
+        assert "PagedAttentionDecode" in disabled
+        assert "StoreKVCache" in disabled
+        assert "SDPA" in disabled
+        assert patching._function_patch_enabled(
+            next(spec for spec in patching._FUNCTION_PATCH_SPECS if spec.patch_id == "GELU")
+        )
+
     def test_usage_summary_auto_discovers_registered_ops(self):
         _require_runtime()
         from vllm_nt import register

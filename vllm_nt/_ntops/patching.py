@@ -43,6 +43,23 @@ logger = logging.getLogger("vllm_nt")
 _PARENT_PID_ENV = "VLLM_NT_PARENT_PID"
 os.environ.setdefault(_PARENT_PID_ENV, str(os.getpid()))
 OperatorSpec = tuple[type, Callable[..., object]]
+_TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
+_FEATURE_ENV_VARS = {
+    "FA": "VLLM_NT_ENABLE_FA",
+    "MM": "VLLM_NT_ENABLE_MM",
+}
+_FUNCTION_PATCH_FEATURES = {
+    "StoreKVCache": "FA",
+    "UnifiedAttentionWithOutput": "FA",
+    "PagedAttentionPrefill": "FA",
+    "PagedAttentionDecode": "FA",
+    "UnifiedAttention2D": "FA",
+    "SDPA": "FA",
+}
+_OPERATOR_FEATURES = {
+    "MatMul": "MM",
+    "LMHead": "MM",
+}
 
 
 @dataclass(frozen=True)
@@ -122,6 +139,30 @@ def _record_hit(name: str, x: torch.Tensor) -> None:
     if not stats.logged:
         logger.info("vllm-nt: ninetoothed %s kernel invoked (shape=%s)", name, x.shape)
         stats.logged = True
+
+
+def _env_flag_enabled(name: str, *, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in _TRUTHY_ENV_VALUES
+
+
+def _nt_feature_enabled(feature: str | None = None) -> bool:
+    if not _env_flag_enabled("VLLM_NT_ENABLE_ALL", default=True):
+        return False
+    if feature is None:
+        return True
+    env_name = _FEATURE_ENV_VARS[feature]
+    return _env_flag_enabled(env_name, default=True)
+
+
+def _operator_enabled(name: str) -> bool:
+    return _nt_feature_enabled(_OPERATOR_FEATURES.get(name))
+
+
+def _function_patch_enabled(spec: FunctionPatchSpec) -> bool:
+    return _nt_feature_enabled(_FUNCTION_PATCH_FEATURES.get(spec.patch_id))
 
 
 def _nt_rms_norm_forward(self, x: torch.Tensor, residual: torch.Tensor | None = None):
@@ -2240,6 +2281,8 @@ _INSTALLED_CUSTOM_OP_INTERCEPT: _InstalledCustomOpIntercept | None = None
 def _try_register_oot() -> bool:
     try:
         for name, (cls, forward) in _OPERATOR_SPECS.items():
+            if not _operator_enabled(name):
+                continue
             cls.register_oot(name=name)(
                 type(f"NT{name}", (cls,), {"forward_oot": forward})
             )
@@ -2255,6 +2298,8 @@ def _try_register_oot() -> bool:
 
 def _monkey_patch() -> None:
     for name, (cls, forward) in _OPERATOR_SPECS.items():
+        if not _operator_enabled(name):
+            continue
         cls.forward_oot = forward
         cls.forward_native = forward
         _set_registered_via(name, "monkey_patch")
@@ -2299,12 +2344,15 @@ def _nt_unquantized_embedding_apply(
 
 
 def _patch_leaf_methods() -> None:
-    UnquantizedLinearMethod.apply = _nt_unquantized_linear_apply
-    _set_registered_via("MatMul", "monkey_patch")
-    UnquantizedEmbeddingMethod.embedding = _nt_unquantized_embedding
-    _set_registered_via("Embedding", "monkey_patch")
-    UnquantizedEmbeddingMethod.apply = _nt_unquantized_embedding_apply
-    _set_registered_via("LMHead", "monkey_patch")
+    if _operator_enabled("MatMul"):
+        UnquantizedLinearMethod.apply = _nt_unquantized_linear_apply
+        _set_registered_via("MatMul", "monkey_patch")
+    if _operator_enabled("Embedding"):
+        UnquantizedEmbeddingMethod.embedding = _nt_unquantized_embedding
+        _set_registered_via("Embedding", "monkey_patch")
+    if _operator_enabled("LMHead"):
+        UnquantizedEmbeddingMethod.apply = _nt_unquantized_embedding_apply
+        _set_registered_via("LMHead", "monkey_patch")
 
 
 def _resolve_function_patch_target(spec: FunctionPatchSpec) -> tuple[object, object]:
@@ -2319,6 +2367,8 @@ def _apply_function_patches() -> None:
     applied: list[_AppliedFunctionPatch] = []
     try:
         for spec in _FUNCTION_PATCH_SPECS:
+            if not _function_patch_enabled(spec):
+                continue
             try:
                 target_obj, original = _resolve_function_patch_target(spec)
                 replacement = original if spec.builder is None else spec.builder(original)
@@ -2360,13 +2410,13 @@ def _build_direct_register_custom_op_intercept(
         tags: tuple[torch.Tag, ...] = (),
     ):
         replacement = op_func
-        if op_name == "unified_kv_cache_update":
+        if op_name == "unified_kv_cache_update" and _nt_feature_enabled("FA"):
             replacement = _build_custom_op_unified_kv_cache_update()
-        elif op_name == "unified_attention":
+        elif op_name == "unified_attention" and _nt_feature_enabled("FA"):
             replacement = _build_custom_op_unified_attention()
             _set_registered_via("PagedAttentionPrefill", "custom_op_intercept")
             _set_registered_via("PagedAttentionDecode", "custom_op_intercept")
-        elif op_name == "unified_attention_with_output":
+        elif op_name == "unified_attention_with_output" and _nt_feature_enabled("FA"):
             replacement = _build_custom_op_unified_attention_with_output()
             _set_registered_via("PagedAttentionPrefill", "custom_op_intercept")
             _set_registered_via("PagedAttentionDecode", "custom_op_intercept")
@@ -2419,6 +2469,8 @@ def _rebind_custom_op(
 def _apply_custom_op_rebindings() -> None:
     global _APPLIED_CUSTOM_OP_REBINDS
     if os.environ.get("VLLM_NT_ENABLE_CUSTOM_OP_REBIND") != "1":
+        return
+    if not _nt_feature_enabled("FA"):
         return
 
     applied: list[_AppliedCustomOpRebind] = []
@@ -2518,6 +2570,10 @@ atexit.register(_print_worker_summary_on_exit)
 def ensure_registered() -> None:
     global _registered
     if _registered:
+        return
+    if not _nt_feature_enabled():
+        logger.info("vllm-nt: registration skipped because VLLM_NT_ENABLE_ALL is disabled")
+        _registered = True
         return
     _registered = True
     _install_custom_op_register_intercept()
