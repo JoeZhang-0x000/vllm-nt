@@ -118,7 +118,7 @@ def main() -> int:
     parser.add_argument(
         "--gpu-memory-utilization",
         type=float,
-        default=0.9,
+        default=0.7,
         help="vLLM gpu_memory_utilization",
     )
     parser.add_argument(
@@ -154,6 +154,18 @@ def main() -> int:
         print(f"mlu_available={torch.mlu.is_available()}")
     if hasattr(torch, "musa"):
         print(f"musa_available={torch.musa.is_available()}")
+    print(
+        "enable_all="
+        f"{os.environ.get('VLLM_NT_ENABLE_ALL', '1')}"
+    )
+    print(
+        "enable_fa="
+        f"{os.environ.get('VLLM_NT_ENABLE_FA', '1')}"
+    )
+    print(
+        "enable_mm="
+        f"{os.environ.get('VLLM_NT_ENABLE_MM', '1')}"
+    )
     print(
         "experimental_forward_patch="
         f"{os.environ.get('VLLM_NT_ENABLE_EXPERIMENTAL_FORWARD_PATCH', '0')}"
@@ -233,6 +245,7 @@ def main() -> int:
         dtype=args.dtype,
         tensor_parallel_size=args.tensor_parallel_size,
         gpu_memory_utilization=args.gpu_memory_utilization,
+        trust_remote_code=True,
     )
     sampling_params = SamplingParams(max_tokens=args.max_tokens)
     outputs = llm.generate([args.prompt], sampling_params)
