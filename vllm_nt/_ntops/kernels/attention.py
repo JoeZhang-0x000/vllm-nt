@@ -1,9 +1,9 @@
 import functools
 import math
 
+import torch
 import ninetoothed
 import ninetoothed.language as ntl
-import torch
 from ninetoothed import Tensor
 
 

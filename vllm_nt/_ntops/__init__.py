@@ -1,5 +1,11 @@
 """Vendored subset of ntops — NineToothed operators for vLLM."""
 
-from vllm_nt._ntops import kernels, torch
+#
+# Import torch-backed wrappers before raw kernel modules.
+# On MUSA, ninetoothed imports Triton, and Triton's MTGPU backend imports torch.
+# If kernels are imported first, this can trigger a re-entrant torch import
+# during package initialization and fail with duplicate TORCH_LIBRARY
+# registration for the "triton" namespace.
+from vllm_nt._ntops import torch, kernels
 
 __all__ = ["kernels", "torch"]
