@@ -175,13 +175,18 @@ def _run_accuracy_child(args: argparse.Namespace) -> None:
     use_nt = args.mode != "vllm_native"
     LLM, SamplingParams, get_usage_summary = _load_vllm_runtime(use_nt)
 
-    llm = LLM(
-        model=args.model,
-        dtype=args.dtype,
-        tensor_parallel_size=args.tensor_parallel_size,
-        gpu_memory_utilization=args.gpu_memory_utilization,
-        trust_remote_code=True,
-    )
+    llm_kwargs = {
+        "model": args.model,
+        "dtype": args.dtype,
+        "tensor_parallel_size": args.tensor_parallel_size,
+        "gpu_memory_utilization": args.gpu_memory_utilization,
+        "trust_remote_code": True,
+    }
+    if args.max_model_len:
+        llm_kwargs["max_model_len"] = args.max_model_len
+    if args.max_num_batched_tokens:
+        llm_kwargs["max_num_batched_tokens"] = args.max_num_batched_tokens
+    llm = LLM(**llm_kwargs)
     sampling_params = SamplingParams(
         temperature=0.0,
         top_p=1.0,
@@ -239,13 +244,18 @@ def _run_throughput_child(args: argparse.Namespace) -> None:
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
-    llm = LLM(
-        model=args.model,
-        dtype=args.dtype,
-        tensor_parallel_size=args.tensor_parallel_size,
-        gpu_memory_utilization=args.gpu_memory_utilization,
-        trust_remote_code=True,
-    )
+    llm_kwargs = {
+        "model": args.model,
+        "dtype": args.dtype,
+        "tensor_parallel_size": args.tensor_parallel_size,
+        "gpu_memory_utilization": args.gpu_memory_utilization,
+        "trust_remote_code": True,
+    }
+    if args.max_model_len:
+        llm_kwargs["max_model_len"] = args.max_model_len
+    if args.max_num_batched_tokens:
+        llm_kwargs["max_num_batched_tokens"] = args.max_num_batched_tokens
+    llm = LLM(**llm_kwargs)
     sampling_params = SamplingParams(
         temperature=0.0,
         top_p=1.0,
@@ -315,6 +325,12 @@ def _render_report(
     throughput_results: dict[str, dict[str, Any]],
     args: argparse.Namespace,
 ) -> str:
+    configured_max_num_configs = os.environ.get("VLLM_NT_MAX_NUM_CONFIGS")
+    configured_max_num_configs_mode = (
+        "(explicit)"
+        if configured_max_num_configs is not None
+        else os.environ.get("VLLM_NT_MAX_NUM_CONFIGS_MODE", "quick")
+    )
     lines = [
         "# NT MLU Validation Report",
         "",
@@ -322,8 +338,10 @@ def _render_report(
         f"- dtype: `{args.dtype}`",
         f"- tensor_parallel_size: `{args.tensor_parallel_size}`",
         f"- gpu_memory_utilization: `{args.gpu_memory_utilization}`",
-        f"- max_num_configs: `{os.environ.get('VLLM_NT_MAX_NUM_CONFIGS', '(mode/default)')}`",
-        f"- max_num_configs_mode: `{os.environ.get('VLLM_NT_MAX_NUM_CONFIGS_MODE', 'quick')}`",
+        f"- max_num_configs: `{configured_max_num_configs or '(mode/default)'}`",
+        f"- max_num_configs_mode: `{configured_max_num_configs_mode}`",
+        f"- max_model_len: `{args.max_model_len or '(model default)'}`",
+        f"- max_num_batched_tokens: `{args.max_num_batched_tokens or '(vLLM default)'}`",
         f"- mlu_visible_devices: `{os.environ.get('MLU_VISIBLE_DEVICES', '(default)')}`",
         "- v1_multiprocessing: `0`",
         f"- accuracy max tokens: `{args.accuracy_max_tokens}`",
@@ -420,6 +438,10 @@ def _run_suite(args: argparse.Namespace) -> None:
                     str(args.tensor_parallel_size),
                     "--gpu-memory-utilization",
                     str(args.gpu_memory_utilization),
+                    "--max-model-len",
+                    str(args.max_model_len or 0),
+                    "--max-num-batched-tokens",
+                    str(args.max_num_batched_tokens or 0),
                 ],
             )
 
@@ -447,6 +469,10 @@ def _run_suite(args: argparse.Namespace) -> None:
                     str(args.tensor_parallel_size),
                     "--gpu-memory-utilization",
                     str(args.gpu_memory_utilization),
+                    "--max-model-len",
+                    str(args.max_model_len or 0),
+                    "--max-num-batched-tokens",
+                    str(args.max_num_batched_tokens or 0),
                 ],
             )
 
@@ -472,6 +498,8 @@ def build_parser() -> argparse.ArgumentParser:
     suite_parser.add_argument("--dtype", default="bfloat16")
     suite_parser.add_argument("--tensor-parallel-size", type=int, default=1)
     suite_parser.add_argument("--gpu-memory-utilization", type=float, default=0.7)
+    suite_parser.add_argument("--max-model-len", type=int, default=None)
+    suite_parser.add_argument("--max-num-batched-tokens", type=int, default=None)
     suite_parser.add_argument("--accuracy-max-tokens", type=int, default=64)
     suite_parser.add_argument("--throughput-input-len", type=int, default=64)
     suite_parser.add_argument("--throughput-output-len", type=int, default=64)
@@ -491,6 +519,8 @@ def build_parser() -> argparse.ArgumentParser:
         child_parser.add_argument("--dtype", default="bfloat16")
         child_parser.add_argument("--tensor-parallel-size", type=int, default=1)
         child_parser.add_argument("--gpu-memory-utilization", type=float, default=0.7)
+        child_parser.add_argument("--max-model-len", type=int, default=0)
+        child_parser.add_argument("--max-num-batched-tokens", type=int, default=0)
 
         if name == "accuracy-child":
             child_parser.add_argument("--max-tokens", type=int, default=64)

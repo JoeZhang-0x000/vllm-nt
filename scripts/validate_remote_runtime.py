@@ -122,6 +122,18 @@ def main() -> int:
         help="vLLM gpu_memory_utilization",
     )
     parser.add_argument(
+        "--max-model-len",
+        type=int,
+        default=0,
+        help="Optional vLLM max_model_len override",
+    )
+    parser.add_argument(
+        "--max-num-batched-tokens",
+        type=int,
+        default=0,
+        help="Optional vLLM max_num_batched_tokens override",
+    )
+    parser.add_argument(
         "--expect-hit",
         type=_csv,
         default=[],
@@ -240,15 +252,22 @@ def main() -> int:
     print(f"model={args.model}")
     print(f"dtype={args.dtype}")
     print(f"tensor_parallel_size={args.tensor_parallel_size}")
+    print(f"max_model_len={args.max_model_len or '(model default)'}")
+    print(f"max_num_batched_tokens={args.max_num_batched_tokens or '(vLLM default)'}")
     print(f"prompt={args.prompt!r}")
 
-    llm = LLM(
-        model=args.model,
-        dtype=args.dtype,
-        tensor_parallel_size=args.tensor_parallel_size,
-        gpu_memory_utilization=args.gpu_memory_utilization,
-        trust_remote_code=True,
-    )
+    llm_kwargs = {
+        "model": args.model,
+        "dtype": args.dtype,
+        "tensor_parallel_size": args.tensor_parallel_size,
+        "gpu_memory_utilization": args.gpu_memory_utilization,
+        "trust_remote_code": True,
+    }
+    if args.max_model_len:
+        llm_kwargs["max_model_len"] = args.max_model_len
+    if args.max_num_batched_tokens:
+        llm_kwargs["max_num_batched_tokens"] = args.max_num_batched_tokens
+    llm = LLM(**llm_kwargs)
     sampling_params = SamplingParams(max_tokens=args.max_tokens)
     outputs = llm.generate([args.prompt], sampling_params)
     text = outputs[0].outputs[0].text
