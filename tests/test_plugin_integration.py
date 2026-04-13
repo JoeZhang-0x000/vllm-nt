@@ -272,6 +272,89 @@ class TestPluginRegistration:
         assert out is sentinel
         assert summary["operators"]["RejectionSample"]["hits"] == 1
 
+    def test_musa_flash_attention_impl_forward_tracks_hits(self, monkeypatch):
+        _require_runtime()
+        import torch
+        import vllm_nt._ntops.patching as patching
+
+        _reset_usage_state = patching._reset_usage_state
+        get_usage_summary = patching.get_usage_summary
+
+        class DummyImpl:
+            num_heads = 1
+            num_kv_heads = 1
+            head_size = 2
+            scale = 0.5
+            dcp_world_size = 1
+            sliding_window = None
+            alibi_slopes = None
+            sinks = None
+            logits_soft_cap = 0
+
+        class DummyLayer:
+            _k_scale = torch.ones(1)
+            _v_scale = torch.ones(1)
+
+        class DummyMetadata:
+            num_actual_tokens = 3
+            use_cascade = False
+            num_decode_tokens = 1
+            num_prefill_tokens = 2
+            decode_seq_lens = torch.tensor([2], dtype=torch.int32)
+            decode_block_table = torch.tensor([[0, 1]], dtype=torch.int32)
+            prefill_query_start_loc = torch.tensor([0, 2], dtype=torch.int32)
+            prefill_max_seq_len = 2
+            causal = True
+
+        monkeypatch.setattr(
+            patching,
+            "paged_attention_decode",
+            lambda *args, **kwargs: torch.tensor([[[[11.0, 12.0]]]]),
+        )
+        monkeypatch.setattr(
+            patching,
+            "paged_attention_prefill",
+            lambda *args, **kwargs: torch.tensor(
+                [[[21.0, 22.0]], [[31.0, 32.0]]]
+            ),
+        )
+
+        wrapped = patching._build_musa_flash_attention_impl_forward(
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("unexpected fallback")
+            )
+        )
+
+        _reset_usage_state()
+        query = torch.zeros((3, 1, 2), dtype=torch.float32)
+        key = torch.zeros_like(query)
+        value = torch.zeros_like(query)
+        kv_cache = torch.zeros((2, 4, 2, 1, 2), dtype=torch.float32)
+        output = torch.zeros((3, 2), dtype=torch.float32)
+
+        result = wrapped(
+            DummyImpl(),
+            DummyLayer(),
+            query,
+            key,
+            value,
+            kv_cache,
+            DummyMetadata(),
+            output,
+        )
+        summary = cast(dict[str, Any], get_usage_summary())
+
+        assert result is output
+        torch.testing.assert_close(
+            output,
+            torch.tensor(
+                [[11.0, 12.0], [21.0, 22.0], [31.0, 32.0]],
+                dtype=torch.float32,
+            ),
+        )
+        assert summary["operators"]["PagedAttentionDecode"]["hits"] == 1
+        assert summary["operators"]["PagedAttentionPrefill"]["hits"] == 1
+
     def test_qwen2_mlp_patch_tracks_silu_and_mul_hits(self):
         _require_runtime()
         import torch

@@ -152,6 +152,8 @@ def main() -> int:
     print(f"cuda_available={torch.cuda.is_available()}")
     if hasattr(torch, "mlu"):
         print(f"mlu_available={torch.mlu.is_available()}")
+    if hasattr(torch, "musa"):
+        print(f"musa_available={torch.musa.is_available()}")
     print(
         "experimental_forward_patch="
         f"{os.environ.get('VLLM_NT_ENABLE_EXPERIMENTAL_FORWARD_PATCH', '0')}"

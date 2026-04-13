@@ -22,7 +22,7 @@ This document covers the accelerator-backed validation that cannot be completed 
 
 ## Recommended Environment
 
-- Machine with CUDA or MLU available
+- Machine with CUDA, MLU, or MUSA available
 - Python environment that can import:
   - `torch`
   - `vllm`

@@ -14,7 +14,14 @@ def _get_device():
             return "mlu"
     except ImportError:
         pass
-    pytest.skip("No accelerator device available (need CUDA or MLU)")
+    try:
+        import torch_musa  # noqa: F401
+
+        if torch.musa.is_available():
+            return "musa"
+    except ImportError:
+        pass
+    pytest.skip("No accelerator device available (need CUDA, MLU, or MUSA)")
 
 
 def _reference_varlen(q, k, v, cu_q, cu_k):

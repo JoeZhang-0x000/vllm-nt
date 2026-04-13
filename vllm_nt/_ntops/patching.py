@@ -1757,6 +1757,187 @@ def _build_mlu_flash_attention_impl_forward(original: object) -> object:
     return _mark_function_patch(forward, "PagedAttentionDecode")
 
 
+def _build_musa_flash_attention_impl_forward(original: object) -> object:
+    if _is_function_patch(original, "PagedAttentionDecode"):
+        return original
+    original_fn = cast(Callable[..., object], original)
+
+    def forward(
+        self,
+        layer: torch.nn.Module,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if (
+            output is None
+            or attn_metadata is None
+            or output_scale is not None
+            or output_block_scale is not None
+        ):
+            return original_fn(
+                self,
+                layer,
+                query,
+                key,
+                value,
+                kv_cache,
+                attn_metadata,
+                output,
+                output_scale,
+                output_block_scale,
+            )
+
+        if (
+            getattr(attn_metadata, "use_cascade", False)
+            or getattr(self, "dcp_world_size", 1) > 1
+            or getattr(self, "sliding_window", None) is not None
+            or getattr(self, "alibi_slopes", None) is not None
+            or getattr(self, "sinks", None) is not None
+            or getattr(self, "logits_soft_cap", 0) not in (0, None)
+        ):
+            return original_fn(
+                self,
+                layer,
+                query,
+                key,
+                value,
+                kv_cache,
+                attn_metadata,
+                output,
+                output_scale,
+                output_block_scale,
+            )
+
+        if not isinstance(kv_cache, torch.Tensor) or kv_cache.shape[0] < 2:
+            return original_fn(
+                self,
+                layer,
+                query,
+                key,
+                value,
+                kv_cache,
+                attn_metadata,
+                output,
+                output_scale,
+                output_block_scale,
+            )
+
+        key_cache, value_cache = kv_cache.unbind(0)
+        num_actual_tokens = int(getattr(attn_metadata, "num_actual_tokens", 0))
+        if num_actual_tokens <= 0:
+            return output
+
+        try:
+            num_decode_tokens = int(getattr(attn_metadata, "num_decode_tokens", 0))
+            num_prefill_tokens = int(getattr(attn_metadata, "num_prefill_tokens", 0))
+            causal = bool(getattr(attn_metadata, "causal", True))
+
+            if num_decode_tokens > 0:
+                decode_seq_lens = getattr(attn_metadata, "decode_seq_lens", None)
+                decode_block_table = getattr(attn_metadata, "decode_block_table", None)
+                if decode_seq_lens is None or decode_block_table is None:
+                    return original_fn(
+                        self,
+                        layer,
+                        query,
+                        key,
+                        value,
+                        kv_cache,
+                        attn_metadata,
+                        output,
+                        output_scale,
+                        output_block_scale,
+                    )
+
+                decode_query = query[:num_decode_tokens].view(
+                    -1, 1, self.num_heads, self.head_size
+                )
+                _record_hit("PagedAttentionDecode", query[:num_decode_tokens])
+                decode_output = paged_attention_decode(
+                    decode_query,
+                    key_cache,
+                    value_cache,
+                    decode_seq_lens,
+                    decode_block_table,
+                    softmax_scale=self.scale,
+                    causal=causal,
+                )
+                output[:num_decode_tokens].copy_(
+                    decode_output.reshape_as(output[:num_decode_tokens])
+                )
+
+            if num_prefill_tokens > 0:
+                prefill_query_start_loc = getattr(
+                    attn_metadata, "prefill_query_start_loc", None
+                )
+                prefill_max_seq_len = getattr(
+                    attn_metadata, "prefill_max_seq_len", None
+                )
+                if (
+                    prefill_query_start_loc is None
+                    or prefill_max_seq_len is None
+                ):
+                    return original_fn(
+                        self,
+                        layer,
+                        query,
+                        key,
+                        value,
+                        kv_cache,
+                        attn_metadata,
+                        output,
+                        output_scale,
+                        output_block_scale,
+                    )
+
+                prefill_start = num_decode_tokens
+                prefill_end = prefill_start + num_prefill_tokens
+                prefill_query = query[prefill_start:prefill_end]
+                _record_hit("PagedAttentionPrefill", prefill_query)
+                prefill_output = paged_attention_prefill(
+                    prefill_query,
+                    key[prefill_start:prefill_end],
+                    value[prefill_start:prefill_end],
+                    prefill_query_start_loc,
+                    prefill_query_start_loc,
+                    int(prefill_max_seq_len),
+                    softmax_scale=self.scale,
+                    causal=causal,
+                )
+                output[prefill_start:prefill_end].copy_(
+                    prefill_output.reshape_as(output[prefill_start:prefill_end])
+                )
+
+            return output
+        except Exception as exc:
+            _log_once(
+                "warning",
+                "fallback:musa_flash_attn_impl_forward",
+                "vllm-nt: MUSA FlashAttentionImpl.forward NT path failed (%s)",
+                exc,
+            )
+            return original_fn(
+                self,
+                layer,
+                query,
+                key,
+                value,
+                kv_cache,
+                attn_metadata,
+                output,
+                output_scale,
+                output_block_scale,
+            )
+
+    return _mark_function_patch(forward, "PagedAttentionDecode")
+
+
 _OPERATOR_SPECS: dict[str, OperatorSpec] = {
     "RMSNorm": (layernorm.RMSNorm, _nt_rms_norm_forward),
     "SiluAndMul": (activation.SiluAndMul, _nt_silu_and_mul_forward),
@@ -1922,6 +2103,14 @@ _FUNCTION_PATCH_SPECS_BASE: tuple[FunctionPatchSpec, ...] = (
     ),
     FunctionPatchSpec(
         patch_id="SiluAndMul",
+        module_path="vllm.model_executor.models.qwen3",
+        object_name="Qwen3MLP",
+        attr_name="forward",
+        required=False,
+        builder=_build_qwen2_mlp_forward,
+    ),
+    FunctionPatchSpec(
+        patch_id="SiluAndMul",
         module_path="vllm_mlu._mlu_ops",
         attr_name="active",
         required=False,
@@ -1992,6 +2181,14 @@ _FUNCTION_PATCH_SPECS_BASE: tuple[FunctionPatchSpec, ...] = (
         attr_name="forward",
         required=False,
         builder=_build_mlu_flash_attention_impl_forward,
+    ),
+    FunctionPatchSpec(
+        patch_id="PagedAttentionDecode",
+        module_path="vllm_musa.v1.attention.backends.flash_attn",
+        object_name="FlashAttentionImpl",
+        attr_name="forward",
+        required=False,
+        builder=_build_musa_flash_attention_impl_forward,
     ),
     # Patch Attention.forward AFTER vllm_mlu.attention.layer is imported above,
     # because importing that module runs MluHijackObject.apply_hijack which does
