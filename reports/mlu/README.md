@@ -55,13 +55,16 @@
 离线吞吐统一配置：
 
 - `enforce_eager=1`
+- `prompt_token_ids` 负载，关闭 detokenization
 - `input_len=64`
 - `output_len=64`
-- `warmup_iters=1`
-- `measure_iters=3`
-- `max_model_len=512`
-- `max_num_batched_tokens=512`
+- `warmup_iters=2`
+- `measure_iters=5`
+- `max_model_len=input_len + output_len = 128`
+- `max_num_batched_tokens=batch_size * input_len`
 - `max_num_configs=10`
+
+主指标使用 `output tok/s`，同时在详细表中保留 `req/s`、`total tok/s`、`mean iter sec`、`std iter sec`。
 
 每个模型测试 6 种模式：
 
@@ -74,22 +77,22 @@
 
 关键结果：
 
-| model | native tok/s | NT_All tok/s | best mode | best / native |
+| model | native output tok/s | NT_All output tok/s | best mode | best / native |
 | --- | ---: | ---: | --- | ---: |
-| `Llama-2-7b-chat-hf` | `5251.13` | `3108.28` | `NO_RMS_MM_FA` | `99.3%` |
-| `Qwen2.5-7B-Instruct` | `7519.98` | `4009.07` | `NO_RMS_MM_FA` | `99.8%` |
-| `MiniCPM4.1-8B` | `4166.13` | `749.86` | `NO_RMS_MM_FA` | `23.4%` |
-| `glm-4-9b` | `4317.21` | `2732.99` | `NO_RMS_MM_FA` | `99.6%` |
-| `Mistral-7B-Instruct-v0.3` | `6800.23` | `4020.62` | `NO_RMS_MM_FA` | `99.4%` |
-| `gpt2` | `45921.82` | `35584.29` | `NO_RMS_MM_FA` | `97.2%` |
-| `DeepSeek-R1-Distill-Qwen-7B` | `6587.16` | `3785.96` | `NO_RMS_MM_FA` | `99.5%` |
+| `Llama-2-7b-chat-hf` | `3240.76` | `2005.74` | `NO_RMS_MM_FA` | `99.3%` |
+| `Qwen2.5-7B-Instruct` | `5239.90` | `3002.63` | `NO_RMS_MM_FA` | `99.8%` |
+| `MiniCPM4.1-8B` | `2661.34` | `FAIL` | `no NT result` | `-` |
+| `glm-4-9b` | `2852.52` | `1838.88` | `NO_RMS_MM_FA` | `99.6%` |
+| `Mistral-7B-Instruct-v0.3` | `4981.21` | `2893.60` | `NO_RMS_MM_FA` | `99.7%` |
+| `gpt2` | `27336.08` | `24239.08` | `NO_MM` | `103.6%` |
+| `DeepSeek-R1-Distill-Qwen-7B` | `4366.88` | `2516.54` | `NO_RMS_MM_FA` | `99.9%` |
 
 结论：
 
-1. 对 7 个模型中的 6 个，`NO_RMS_MM_FA` 都几乎恢复到 native，说明当前剩余大头主要集中在 `RMSNorm`，其次是 `MM` 和 `FA` 的组合影响。
-2. `NO_MM` 在多数模型上也能明显提升吞吐，说明 MM 修复后仍有残余开销，但已经不是之前几十倍那种级别。
+1. 对 7 个模型中的 5 个，`NO_RMS_MM_FA` 都几乎恢复到 native，说明当前剩余大头主要集中在 `RMSNorm`，其次是 `MM` 和 `FA` 的组合影响。
+2. `gpt2` 的最优模式是 `NO_MM`，说明它对 MM 仍然更敏感。
 3. `NO_FA` 单独关闭通常收益有限，说明在当前 MLU 环境下 FA 不是主导瓶颈。
-4. `MiniCPM4.1-8B` 是明显异常点：即使 `NO_RMS_MM_FA` 也只有 `23.4%` native，需要单独拆解。
+4. `MiniCPM4.1-8B` 在新的标准口径下，所有 NT 模式都失败，需要单独拆解并先解决模型路径稳定性问题。
 
 详细表格见 `reports/mlu/throughput_matrix.md`。
 
@@ -140,17 +143,21 @@
    - 这与之前 `vllm-nt` 中 MM 慢几十倍的现象不同，说明集成层的大 bug 已经被修掉
 
 2. **RMSNorm 是当前最稳定的瓶颈**
-   - `NO_RMS` 或 `NO_RMS_MM_FA` 都能让多个模型显著恢复
-   - 官方 `RMSNorm/FusedRMSNorm` 本身在 MLU 上就慢于 torch，说明问题已更多落在 NT kernel 自身
+    - `NO_RMS` 或 `NO_RMS_MM_FA` 都能让多个模型显著恢复
+    - 官方 `RMSNorm/FusedRMSNorm` 本身在 MLU 上就慢于 torch，说明问题已更多落在 NT kernel 自身
 
 3. **SiLU / SwiGLU 也值得关注**
    - 从算子 benchmark 看，这两类激活在官方 NT 库里对 torch 明显偏慢
    - 但端到端上它们没有像 RMSNorm 那样成为首要瓶颈，可能是调用频次或占比没有 RMSNorm 高
 
 4. **MiniCPM4.1-8B 需要单独分析**
-   - 它的恢复比例远低于其它模型
+   - 在新的标准口径下，所有 NT 模式都失败
    - 正确性追踪里它没有命中 `RoPE`
    - 它很可能还有模型结构或模型专用路径的问题，不能直接按其他模型的结论外推
+
+5. **这份吞吐报告更接近标准离线 benchmark，但仍是受控 synthetic workload**
+   - 它适合做 native vs NT mode 的相对比较
+   - 不应直接当成行业横向可比的“峰值吞吐”
 
 ## Final Files
 

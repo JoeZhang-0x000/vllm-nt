@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import statistics
 import subprocess
 import sys
 import time
@@ -155,26 +156,30 @@ def _render_report(args: argparse.Namespace, rows: list[dict[str, Any]]) -> str:
         "## Load Configuration",
         f"- dtype: `{args.dtype}`",
         "- enforce_eager: `1`",
-        f"- input_len/output_len: `{args.input_len}` / `{args.output_len}`",
+        f"- prompt/output lengths: `{args.input_len}` / `{args.output_len}` tokens",
         f"- warmup/measure iters: `{args.warmup_iters}` / `{args.measure_iters}`",
-        f"- max_model_len/max_num_batched_tokens: `{args.max_model_len}` / `{args.max_num_batched_tokens}`",
+        "- primary metric: `output tok/s`",
+        "- secondary metrics: `req/s`, `total tok/s`, `mean iter sec`, `std iter sec`",
+        "- prompts are passed as `prompt_token_ids`; detokenization is disabled during measurement",
+        "- `max_model_len` defaults to `input_len + output_len` unless overridden",
+        "- `max_num_batched_tokens` defaults to `batch_size * input_len` unless overridden",
         f"- max_num_configs: `{args.max_num_configs}`",
         f"- mlu_visible_devices: `{args.mlu_visible_devices}`",
         "",
         "## Summary Table",
-        "| model | batch | native tok/s | NT_All tok/s | NO_RMS tok/s | NO_MM tok/s | NO_FA tok/s | NO_RMS_MM_FA tok/s | conclusion |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| model | batch | max_model_len | max_num_batched_tokens | native output tok/s | NT_All output tok/s | NO_RMS output tok/s | NO_MM output tok/s | NO_FA output tok/s | NO_RMS_MM_FA output tok/s | conclusion |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for model_name, mode_rows in grouped.items():
         native = mode_rows.get("native", {})
         if native.get("status") == "ok":
-            base = native["throughput_total_tokens_per_second"]
+            base = native["throughput_output_tokens_per_second"]
             best_mode = None
             best_ratio = -1.0
             for mode_name in MODE_ORDER[1:]:
                 row = mode_rows.get(mode_name, {})
                 if row.get("status") == "ok":
-                    ratio = row["throughput_total_tokens_per_second"] / base
+                    ratio = row["throughput_output_tokens_per_second"] / base
                     if ratio > best_ratio:
                         best_ratio = ratio
                         best_mode = mode_name
@@ -186,12 +191,33 @@ def _render_report(args: argparse.Namespace, rows: list[dict[str, Any]]) -> str:
             row = mode_rows.get(mode_name, {})
             if row.get("status") != "ok":
                 return "FAIL"
-            return f"{row['throughput_total_tokens_per_second']:.2f}"
+            return f"{row['throughput_output_tokens_per_second']:.2f}"
 
         batch = next((str(mode_rows[m].get("batch_size", DEFAULT_BATCH_SIZES[model_name])) for m in MODE_ORDER if m in mode_rows), str(DEFAULT_BATCH_SIZES[model_name]))
+        effective_max_model_len = next((str(mode_rows[m].get("effective_max_model_len", "-")) for m in MODE_ORDER if m in mode_rows), "-")
+        effective_max_num_batched_tokens = next((str(mode_rows[m].get("effective_max_num_batched_tokens", "-")) for m in MODE_ORDER if m in mode_rows), "-")
         lines.append(
-            f"| `{model_name}` | `{batch}` | {fmt('native')} | {fmt('NT_All')} | {fmt('NO_RMS')} | {fmt('NO_MM')} | {fmt('NO_FA')} | {fmt('NO_RMS_MM_FA')} | {conclusion} |"
+            f"| `{model_name}` | `{batch}` | `{effective_max_model_len}` | `{effective_max_num_batched_tokens}` | {fmt('native')} | {fmt('NT_All')} | {fmt('NO_RMS')} | {fmt('NO_MM')} | {fmt('NO_FA')} | {fmt('NO_RMS_MM_FA')} | {conclusion} |"
         )
+
+    lines.extend(["", "## Detailed Metrics"])
+    for model_name, mode_rows in grouped.items():
+        lines.extend(
+            [
+                f"### `{model_name}`",
+                "| mode | output tok/s | req/s | total tok/s | mean iter sec | std iter sec |",
+                "| --- | ---: | ---: | ---: | ---: | ---: |",
+            ]
+        )
+        for mode_name in MODE_ORDER:
+            row = mode_rows.get(mode_name, {})
+            if row.get("status") != "ok":
+                lines.append(f"| {mode_name} | FAIL | FAIL | FAIL | FAIL | FAIL |")
+                continue
+            lines.append(
+                f"| {mode_name} | {row['throughput_output_tokens_per_second']:.2f} | {row['requests_per_second']:.2f} | {row['throughput_total_tokens_per_second']:.2f} | {row['mean_elapsed_seconds']:.4f} | {row['std_elapsed_seconds']:.4f} |"
+            )
+        lines.append("")
 
     failures = [row for row in rows if row.get("status") != "ok"]
     lines.extend(["", "## Failures"])
@@ -225,15 +251,21 @@ def _run_throughput_child(args: argparse.Namespace) -> None:
         get_usage_summary = None
     from transformers import AutoTokenizer
     from vllm import LLM, SamplingParams
+    from vllm.inputs import TokensPrompt
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+    effective_max_model_len = args.max_model_len or (args.input_len + args.output_len)
+    effective_max_num_batched_tokens = args.max_num_batched_tokens or max(
+        args.batch_size * args.input_len,
+        effective_max_model_len,
+    )
     llm = LLM(
         model=args.model,
         dtype=args.dtype,
         tensor_parallel_size=args.tensor_parallel_size,
         gpu_memory_utilization=args.gpu_memory_utilization,
-        max_model_len=args.max_model_len,
-        max_num_batched_tokens=args.max_num_batched_tokens,
+        max_model_len=effective_max_model_len,
+        max_num_batched_tokens=effective_max_num_batched_tokens,
         trust_remote_code=True,
         enforce_eager=bool(args.enforce_eager),
     )
@@ -243,39 +275,50 @@ def _run_throughput_child(args: argparse.Namespace) -> None:
         max_tokens=args.output_len,
         min_tokens=args.output_len,
         ignore_eos=True,
+        detokenize=False,
     )
 
     base_text = "Summarize this note in one sentence and keep the wording precise. "
     base_ids = tokenizer.encode(base_text, add_special_tokens=False)
+    prompt_token_ids = []
+    for index in range(args.batch_size):
+        prefix_ids = tokenizer.encode(
+            f"Request {index}: ", add_special_tokens=False
+        )
+        token_ids = list(prefix_ids)
+        while len(token_ids) < args.input_len:
+            token_ids.extend(base_ids)
+        prompt_token_ids.append(token_ids[: args.input_len])
+    prompts = [TokensPrompt(prompt_token_ids=ids) for ids in prompt_token_ids]
 
-    prompt_tokens_sum = 0
+    prompt_tokens_sum = args.measure_iters * sum(len(ids) for ids in prompt_token_ids)
     output_tokens_sum = 0
     elapsed = 0.0
+    elapsed_samples = []
     for iteration in range(args.warmup_iters + args.measure_iters):
-        prompts = []
-        for index in range(args.batch_size):
-            prefix_ids = tokenizer.encode(f"Request {iteration * args.batch_size + index}: ", add_special_tokens=False)
-            token_ids = list(prefix_ids)
-            while len(token_ids) < args.input_len:
-                token_ids.extend(base_ids)
-            prompts.append(tokenizer.decode(token_ids[: args.input_len], clean_up_tokenization_spaces=False))
-        prompt_tokens = sum(len(tokenizer.encode(prompt, add_special_tokens=False)) for prompt in prompts)
         start = time.perf_counter()
-        outputs = llm.generate(prompts, sampling_params)
+        outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
         delta = time.perf_counter() - start
-        output_tokens = sum(len(getattr(output.outputs[0], "token_ids", []) or tokenizer.encode(output.outputs[0].text, add_special_tokens=False)) for output in outputs)
+        output_tokens = sum(len(output.outputs[0].token_ids or []) for output in outputs)
         if iteration >= args.warmup_iters:
-            prompt_tokens_sum += prompt_tokens
             output_tokens_sum += output_tokens
             elapsed += delta
+            elapsed_samples.append(delta)
 
     payload = {
         "model_name": args.model_name,
         "mode_name": args.mode_name,
         "status": "ok",
         "batch_size": args.batch_size,
+        "effective_max_model_len": effective_max_model_len,
+        "effective_max_num_batched_tokens": effective_max_num_batched_tokens,
+        "prompt_tokens": prompt_tokens_sum,
+        "output_tokens": output_tokens_sum,
         "throughput_total_tokens_per_second": (prompt_tokens_sum + output_tokens_sum) / elapsed,
         "throughput_output_tokens_per_second": output_tokens_sum / elapsed,
+        "requests_per_second": (args.batch_size * args.measure_iters) / elapsed,
+        "mean_elapsed_seconds": statistics.mean(elapsed_samples),
+        "std_elapsed_seconds": statistics.pstdev(elapsed_samples) if len(elapsed_samples) > 1 else 0.0,
         "usage_summary": get_usage_summary() if get_usage_summary is not None else None,
     }
     print(f"{RESULT_PREFIX}{json.dumps(payload, ensure_ascii=False)}")
@@ -291,13 +334,13 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--dtype", default="bfloat16")
     run_parser.add_argument("--tensor-parallel-size", type=int, default=1)
     run_parser.add_argument("--gpu-memory-utilization", type=float, default=0.7)
-    run_parser.add_argument("--max-model-len", type=int, default=512)
-    run_parser.add_argument("--max-num-batched-tokens", type=int, default=512)
+    run_parser.add_argument("--max-model-len", type=int, default=0)
+    run_parser.add_argument("--max-num-batched-tokens", type=int, default=0)
     run_parser.add_argument("--max-num-configs", type=int, default=10)
     run_parser.add_argument("--input-len", type=int, default=64)
     run_parser.add_argument("--output-len", type=int, default=64)
-    run_parser.add_argument("--warmup-iters", type=int, default=1)
-    run_parser.add_argument("--measure-iters", type=int, default=3)
+    run_parser.add_argument("--warmup-iters", type=int, default=2)
+    run_parser.add_argument("--measure-iters", type=int, default=5)
     run_parser.add_argument("--models", nargs="*", default=None)
 
     child = subparsers.add_parser("throughput-child")
@@ -312,8 +355,8 @@ def build_parser() -> argparse.ArgumentParser:
     child.add_argument("--measure-iters", type=int, default=3)
     child.add_argument("--tensor-parallel-size", type=int, default=1)
     child.add_argument("--gpu-memory-utilization", type=float, default=0.7)
-    child.add_argument("--max-model-len", type=int, default=512)
-    child.add_argument("--max-num-batched-tokens", type=int, default=512)
+    child.add_argument("--max-model-len", type=int, default=0)
+    child.add_argument("--max-num-batched-tokens", type=int, default=0)
     child.add_argument("--enforce-eager", type=int, choices=[0, 1], default=1)
     return parser
 
