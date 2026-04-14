@@ -44,6 +44,7 @@ _PARENT_PID_ENV = "VLLM_NT_PARENT_PID"
 os.environ.setdefault(_PARENT_PID_ENV, str(os.getpid()))
 OperatorSpec = tuple[type, Callable[..., object]]
 _TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
+_DISABLE_OPS_ENV = "VLLM_NT_DISABLE_OPS"
 _FEATURE_ENV_VARS = {
     "FA": "VLLM_NT_ENABLE_FA",
     "MM": "VLLM_NT_ENABLE_MM",
@@ -148,6 +149,13 @@ def _env_flag_enabled(name: str, *, default: bool) -> bool:
     return value.strip().lower() in _TRUTHY_ENV_VALUES
 
 
+def _disabled_ops() -> set[str]:
+    value = os.environ.get(_DISABLE_OPS_ENV, "")
+    if not value:
+        return set()
+    return {item.strip() for item in value.split(",") if item.strip()}
+
+
 def _nt_feature_enabled(feature: str | None = None) -> bool:
     if not _env_flag_enabled("VLLM_NT_ENABLE_ALL", default=True):
         return False
@@ -158,10 +166,14 @@ def _nt_feature_enabled(feature: str | None = None) -> bool:
 
 
 def _operator_enabled(name: str) -> bool:
+    if name in _disabled_ops():
+        return False
     return _nt_feature_enabled(_OPERATOR_FEATURES.get(name))
 
 
 def _function_patch_enabled(spec: FunctionPatchSpec) -> bool:
+    if spec.patch_id in _disabled_ops():
+        return False
     return _nt_feature_enabled(_FUNCTION_PATCH_FEATURES.get(spec.patch_id))
 
 

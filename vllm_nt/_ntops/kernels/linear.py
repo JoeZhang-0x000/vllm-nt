@@ -64,9 +64,9 @@ def premake(
     other_dtype=None,
     output_dtype=None,
     bias=False,
-    block_size_m=64,
-    block_size_n=64,
-    block_size_k=64,
+    block_size_m=BLOCK_SIZE_M,
+    block_size_n=BLOCK_SIZE_N,
+    block_size_k=BLOCK_SIZE_K,
 ):
     arrangement_fn = functools.partial(
         arrangement_with_bias if bias else arrangement,

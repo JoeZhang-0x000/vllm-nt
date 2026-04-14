@@ -207,6 +207,19 @@ class TestPluginRegistration:
             next(spec for spec in patching._FUNCTION_PATCH_SPECS if spec.patch_id == "GELU")
         )
 
+    def test_disable_ops_env_filters_named_paths(self, monkeypatch):
+        _require_runtime()
+        import vllm_nt._ntops.patching as patching
+
+        monkeypatch.setenv("VLLM_NT_DISABLE_OPS", "RMSNorm,RoPE")
+
+        assert not patching._operator_enabled("RMSNorm")
+        rope_spec = next(
+            spec for spec in patching._FUNCTION_PATCH_SPECS if spec.patch_id == "RoPE"
+        )
+        assert not patching._function_patch_enabled(rope_spec)
+        assert patching._operator_enabled("SiluAndMul")
+
     def test_usage_summary_auto_discovers_registered_ops(self):
         _require_runtime()
         from vllm_nt import register

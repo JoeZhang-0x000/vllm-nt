@@ -1,11 +1,12 @@
 import functools
 
+import ninetoothed
 import ninetoothed.language as ntl
-from ninetoothed import Symbol, Tensor
+from ninetoothed import Tensor
 
-BLOCK_SIZE_M = Symbol("BLOCK_SIZE_M", meta=True)
-BLOCK_SIZE_N = Symbol("BLOCK_SIZE_N", meta=True)
-BLOCK_SIZE_K = Symbol("BLOCK_SIZE_K", meta=True)
+BLOCK_SIZE_M = ninetoothed.block_size()
+BLOCK_SIZE_N = ninetoothed.block_size()
+BLOCK_SIZE_K = ninetoothed.block_size()
 
 
 def arrangement(
@@ -43,9 +44,9 @@ def premake(
     lhs_dtype=None,
     rhs_dtype=None,
     output_dtype=None,
-    block_size_m=64,
-    block_size_n=64,
-    block_size_k=64,
+    block_size_m=BLOCK_SIZE_M,
+    block_size_n=BLOCK_SIZE_N,
+    block_size_k=BLOCK_SIZE_K,
 ):
     arrangement_ = functools.partial(
         arrangement,
