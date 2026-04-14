@@ -16,7 +16,7 @@ import triton
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_EXAMPLES_REPO = Path("/tmp/ninetoothed-examples")
-DEFAULT_OUTPUT = REPO_ROOT / "reports" / "mm_hypothesis_benchmark_current.md"
+DEFAULT_OUTPUT = REPO_ROOT / "reports" / "mlu" / "mm_hypothesis_benchmark_current.md"
 DTYPE_BY_NAME = {
     "bfloat16": torch.bfloat16,
     "float16": torch.float16,

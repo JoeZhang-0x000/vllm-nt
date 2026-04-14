@@ -14,7 +14,7 @@ import triton
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_EXAMPLES_REPO = Path("/tmp/ninetoothed-examples")
-DEFAULT_OUTPUT = REPO_ROOT / "reports" / "rms_norm_variant_benchmark.md"
+DEFAULT_OUTPUT = REPO_ROOT / "reports" / "mlu" / "rms_norm_variant_benchmark.md"
 
 
 def main() -> int:

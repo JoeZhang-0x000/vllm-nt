@@ -15,7 +15,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RESULT_PREFIX = "RESULT_JSON="
 QWEN3_MODEL = "Qwen/Qwen3-0.6B"
-DEFAULT_OUTPUT = REPO_ROOT / "reports" / "qwen3_non_mm_ablation.md"
+DEFAULT_OUTPUT = REPO_ROOT / "reports" / "mlu" / "qwen3_non_mm_ablation.md"
 
 
 @dataclass(frozen=True)

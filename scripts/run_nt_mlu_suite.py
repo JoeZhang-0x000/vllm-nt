@@ -501,7 +501,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     suite_parser = subparsers.add_parser("run")
-    suite_parser.add_argument("--output", default="reports/nt_mlu_validation_report.md")
+    suite_parser.add_argument("--output", default="reports/mlu/nt_mlu_validation_report.md")
     suite_parser.add_argument("--dtype", default="bfloat16")
     suite_parser.add_argument("--tensor-parallel-size", type=int, default=1)
     suite_parser.add_argument("--gpu-memory-utilization", type=float, default=0.7)

@@ -14,23 +14,23 @@
 
 ### H1
 - 状态：已验证，成立。
-- 结果：修复前 `current matmul vs official NT` 的几何平均慢速比是 `34.48x`（square）和 `28.39x`（model），说明同一台 MLU 上官方 MM 和 `vllm-nt` 当前 MM 行为明显不同。见 `reports/mm_hypothesis_benchmark_current.md`。
+- 结果：修复前 `current matmul vs official NT` 的几何平均慢速比是 `34.48x`（square）和 `28.39x`（model），说明同一台 MLU 上官方 MM 和 `vllm-nt` 当前 MM 行为明显不同。见 `reports/mlu/mm_hypothesis_benchmark_current.md`。
 
 ### H2
 - 状态：已验证，成立。
-- 结果：将 `vllm_nt/_ntops/kernels/matmul.py` 和 `vllm_nt/_ntops/kernels/linear.py` 从固定 `64/64/64` 改成官方 examples 同款 `ninetoothed.block_size()` 后，`current matmul vs official NT` 从 `34.48x/28.39x` 降到 `1.52x/1.39x`（square/model，`max_num_configs=10`），说明固定 tile 是主因。见 `reports/mm_hypothesis_benchmark_fixed_tuning.md`。
+- 结果：将 `vllm_nt/_ntops/kernels/matmul.py` 和 `vllm_nt/_ntops/kernels/linear.py` 从固定 `64/64/64` 改成官方 examples 同款 `ninetoothed.block_size()` 后，`current matmul vs official NT` 从 `34.48x/28.39x` 降到 `1.52x/1.39x`（square/model，`max_num_configs=10`），说明固定 tile 是主因。见 `reports/mlu/mm_hypothesis_benchmark_fixed_tuning.md`。
 
 ### H3
 - 状态：已验证，不成立。
-- 结果：修复前 `linear+bias vs linear` 的几何平均只多 `1.03x`，修复后也只有 `1.18x`，说明 bias/包装层不是几十倍退化的主因。见 `reports/mm_hypothesis_benchmark_current.md` 和 `reports/mm_hypothesis_benchmark_fixed_tuning.md`。
+- 结果：修复前 `linear+bias vs linear` 的几何平均只多 `1.03x`，修复后也只有 `1.18x`，说明 bias/包装层不是几十倍退化的主因。见 `reports/mlu/mm_hypothesis_benchmark_current.md` 和 `reports/mlu/mm_hypothesis_benchmark_fixed_tuning.md`。
 
 ### H4
 - 状态：已验证，部分不成立。
-- 结果：问题不只出现在矩形 shape，因为修复前连 `1024/2048/4096` square GEMM 也比官方 MM 慢 `27.76x-41.50x`。但修复后矩形/极宽 shape 仍比官方 MM 慢约 `1.13x-1.62x`，所以 shape 仍会放大剩余差距。见 `reports/mm_hypothesis_benchmark_current.md` 与 `reports/mm_hypothesis_benchmark_fixed_tuning.md`。
+- 结果：问题不只出现在矩形 shape，因为修复前连 `1024/2048/4096` square GEMM 也比官方 MM 慢 `27.76x-41.50x`。但修复后矩形/极宽 shape 仍比官方 MM 慢约 `1.13x-1.62x`，所以 shape 仍会放大剩余差距。见 `reports/mlu/mm_hypothesis_benchmark_current.md` 与 `reports/mlu/mm_hypothesis_benchmark_fixed_tuning.md`。
 
 ### H5
 - 状态：已验证，成立。
-- 结果：修复后端到端吞吐明显改善。`gpt2 nt_all_on` 从 `9333.07` 提升到 `36441.27 tok/s`，接近 native `46731.59`；`qwen3 nt_all_on` 从 `913.44` 提升到 `1113.04 tok/s`，说明 MM 修复有效，但 Qwen 仍受其它 NT 算子限制。修复后的完整结果见 `reports/nt_mlu_validation_report.md`。
+- 结果：修复后端到端吞吐明显改善。`gpt2 nt_all_on` 从 `9333.07` 提升到 `36441.27 tok/s`，接近 native `46731.59`；`qwen3 nt_all_on` 从 `913.44` 提升到 `1113.04 tok/s`，说明 MM 修复有效，但 Qwen 仍受其它 NT 算子限制。修复后的完整结果见 `reports/mlu/nt_mlu_validation_report.md`。
 
 ## 当前结论
 

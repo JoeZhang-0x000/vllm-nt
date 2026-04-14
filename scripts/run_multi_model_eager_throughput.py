@@ -18,7 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 MODELS_ROOT = Path("/data02/jiangqiu/models")
 DOWN_MODELS = MODELS_ROOT / "down_models.sh"
 RESULT_PREFIX = "RESULT_JSON="
-DEFAULT_OUTPUT = REPO_ROOT / "reports" / "multi_model_eager_throughput_summary.md"
+DEFAULT_OUTPUT = REPO_ROOT / "reports" / "mlu" / "multi_model_eager_throughput_summary.md"
 MODE_ORDER = (
     "native",
     "NT_All",

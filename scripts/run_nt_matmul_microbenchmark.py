@@ -326,7 +326,7 @@ def render_report(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", default="reports/nt_matmul_microbenchmark.md")
+    parser.add_argument("--output", default="reports/mlu/nt_matmul_microbenchmark.md")
     parser.add_argument("--dtype", choices=sorted(DTYPE_BY_NAME), default="bfloat16")
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=30)
