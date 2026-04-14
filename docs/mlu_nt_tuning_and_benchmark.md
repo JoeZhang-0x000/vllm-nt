@@ -16,10 +16,13 @@
 完整原始报告见：
 
 - `reports/nt_mlu_validation_report.md`
-- `reports/nt_mlu_validation_quick_report.md`
-- `reports/nt_mlu_validation_tuning_report.md`
+- `reports/mm_hypothesis_benchmark_current.md`
+- `reports/mm_hypothesis_benchmark_fixed_tuning.md`
 - `reports/nt_matmul_microbenchmark.md`
-- `reports/nt_matmul_tuning_microbenchmark.md`
+- `reports/official_ninetoothed_examples_mm_mlu.md`
+- `reports/qwen3_non_mm_ablation.md`
+- `reports/rms_norm_variant_benchmark.md`
+- `reports/multi_model_eager_throughput_summary.md`
 
 ## 新增开关
 
@@ -57,7 +60,7 @@ MLU_VISIBLE_DEVICES=1 python scripts/run_nt_matmul_microbenchmark.py \
   --warmup 5 \
   --iters 30 \
   --max-num-configs 10 \
-  --output reports/nt_matmul_tuning_microbenchmark.md
+  --output reports/nt_matmul_microbenchmark.md
 ```
 
 ## 准确性测试

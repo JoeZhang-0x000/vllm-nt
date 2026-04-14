@@ -4,6 +4,10 @@
 - dtype: `bfloat16`
 - tensor_parallel_size: `1`
 - gpu_memory_utilization: `0.7`
+- max_num_configs: `10`
+- max_num_configs_mode: `(explicit)`
+- max_model_len: `512`
+- max_num_batched_tokens: `512`
 - mlu_visible_devices: `1`
 - v1_multiprocessing: `0`
 - accuracy max tokens: `32`
@@ -46,10 +50,10 @@
 #### Throughput
 | mode | batch | total tok/s | output tok/s | mean sec/iter | hit_ops |
 | --- | --- | --- | --- | --- | --- |
-| vllm_native | 128 | 23879.08 | 12324.69 | 0.6647 | native |
-| nt_all_on | 128 | 463.12 | 239.03 | 34.2721 | RMSNorm, SiluAndMul, MatMul, Embedding, LMHead, PagedAttentionPrefill, PagedAttentionDecode, RoPE, TopKTopP, RandomSample |
-| nt_disable_fa | 128 | 463.15 | 239.04 | 34.2698 | RMSNorm, SiluAndMul, MatMul, Embedding, LMHead, RoPE, TopKTopP, RandomSample |
-| nt_disable_fa_mm | 128 | 509.86 | 263.15 | 31.1301 | RMSNorm, SiluAndMul, Embedding, RoPE, TopKTopP, RandomSample |
+| vllm_native | 128 | 22298.55 | 11508.93 | 0.7118 | native |
+| nt_all_on | 128 | 1113.04 | 574.47 | 14.2600 | RMSNorm, SiluAndMul, MatMul, Embedding, LMHead, PagedAttentionPrefill, PagedAttentionDecode, RoPE, TopKTopP, RandomSample |
+| nt_disable_fa | 128 | 1115.82 | 575.91 | 14.2245 | RMSNorm, SiluAndMul, MatMul, Embedding, LMHead, RoPE, TopKTopP, RandomSample |
+| nt_disable_fa_mm | 128 | 1132.78 | 584.66 | 14.0115 | RMSNorm, SiluAndMul, Embedding, RoPE, TopKTopP, RandomSample |
 
 ### `gpt2`
 - model id: `openai-community/gpt2`
@@ -68,16 +72,16 @@
 - mode: `nt_all_on`
 - hit_ops: `GELU, LayerNorm, MatMul, Embedding, WPE, NTWPEKernel, LMHead, PagedAttentionPrefill, PagedAttentionDecode, TopKTopP, RandomSample`
 - prompt: Answer in one short sentence: what is the moon?
-- output: '\n\nThe moon is the most beautiful thing in the universe. It is the most beautiful thing in the universe because it is the only thing that can be seen'
+- output: '\n\nThe moon is a celestial object that orbits the sun. The moon is a celestial object that orbits the sun.\n\nThe moon is a celestial object'
 - prompt: Answer with one word only: the capital of France is
-- output: ' not the capital of France, but the capital of France.\n\nThe French capital is the capital of France.\n\nThe capital of France is the capital'
+- output: ' not the capital of France, but the capital of France.\n\nThe capital of France is not the capital of France, but the capital of France.\n'
 - prompt: Translate to English: 今天天气很好，我们一起去散步。
-- output: '\n\n私报报报报报报报报报'
+- output: '\n\nTranslation: 今天天气很好，我们一起去散步'
 
 #### Throughput
 | mode | batch | total tok/s | output tok/s | mean sec/iter | hit_ops |
 | --- | --- | --- | --- | --- | --- |
-| vllm_native | 256 | 50752.77 | 26194.98 | 0.6255 | native |
-| nt_all_on | 256 | 9761.92 | 5038.41 | 3.2518 | GELU, LayerNorm, MatMul, Embedding, WPE, NTWPEKernel, LMHead, PagedAttentionPrefill, PagedAttentionDecode, TopKTopP, RandomSample |
-| nt_disable_fa | 256 | 9746.28 | 5030.34 | 3.2570 | GELU, LayerNorm, MatMul, Embedding, WPE, NTWPEKernel, LMHead, TopKTopP, RandomSample |
-| nt_disable_fa_mm | 256 | 51504.21 | 26582.82 | 0.6163 | GELU, LayerNorm, Embedding, WPE, NTWPEKernel, TopKTopP, RandomSample |
+| vllm_native | 256 | 46731.59 | 24119.53 | 0.6793 | native |
+| nt_all_on | 256 | 36441.27 | 18808.40 | 0.8711 | GELU, LayerNorm, MatMul, Embedding, WPE, NTWPEKernel, LMHead, PagedAttentionPrefill, PagedAttentionDecode, TopKTopP, RandomSample |
+| nt_disable_fa | 256 | 36180.41 | 18673.76 | 0.8774 | GELU, LayerNorm, MatMul, Embedding, WPE, NTWPEKernel, LMHead, TopKTopP, RandomSample |
+| nt_disable_fa_mm | 256 | 46129.27 | 23808.66 | 0.6882 | GELU, LayerNorm, Embedding, WPE, NTWPEKernel, TopKTopP, RandomSample |

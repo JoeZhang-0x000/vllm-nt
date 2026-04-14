@@ -28,6 +28,5 @@
 - `RMSNorm` is the most consistent limiter across the downloaded model set.
 - `MiniCPM4.1-8B` remains a strong outlier: even the best NT mode only reaches `19.0%` of native throughput.
 
-## Source Reports
-- `reports/multi_model_eager_throughput_batch1.md`
-- `reports/multi_model_eager_throughput_batch2.md`
+## Note
+- 中间分批报告已清理，当前文件保留最终汇总表。

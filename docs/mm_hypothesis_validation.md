@@ -30,7 +30,7 @@
 
 ### H5
 - 状态：已验证，成立。
-- 结果：修复后端到端吞吐明显改善。`gpt2 nt_all_on` 从 `9333.07` 提升到 `36441.27 tok/s`，接近 native `46731.59`；`qwen3 nt_all_on` 从 `913.44` 提升到 `1113.04 tok/s`，说明 MM 修复有效，但 Qwen 仍受其它 NT 算子限制。见 `reports/nt_mlu_validation_tuning_report.md` 与 `reports/nt_mlu_validation_tuning_after_mm_fix.md`。
+- 结果：修复后端到端吞吐明显改善。`gpt2 nt_all_on` 从 `9333.07` 提升到 `36441.27 tok/s`，接近 native `46731.59`；`qwen3 nt_all_on` 从 `913.44` 提升到 `1113.04 tok/s`，说明 MM 修复有效，但 Qwen 仍受其它 NT 算子限制。修复后的完整结果见 `reports/nt_mlu_validation_report.md`。
 
 ## 当前结论
 
