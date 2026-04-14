@@ -181,6 +181,7 @@ def _run_accuracy_child(args: argparse.Namespace) -> None:
         "tensor_parallel_size": args.tensor_parallel_size,
         "gpu_memory_utilization": args.gpu_memory_utilization,
         "trust_remote_code": True,
+        "enforce_eager": bool(args.enforce_eager),
     }
     if args.max_model_len:
         llm_kwargs["max_model_len"] = args.max_model_len
@@ -250,6 +251,7 @@ def _run_throughput_child(args: argparse.Namespace) -> None:
         "tensor_parallel_size": args.tensor_parallel_size,
         "gpu_memory_utilization": args.gpu_memory_utilization,
         "trust_remote_code": True,
+        "enforce_eager": bool(args.enforce_eager),
     }
     if args.max_model_len:
         llm_kwargs["max_model_len"] = args.max_model_len
@@ -342,6 +344,7 @@ def _render_report(
         f"- max_num_configs_mode: `{configured_max_num_configs_mode}`",
         f"- max_model_len: `{args.max_model_len or '(model default)'}`",
         f"- max_num_batched_tokens: `{args.max_num_batched_tokens or '(vLLM default)'}`",
+        f"- enforce_eager: `{args.enforce_eager}`",
         f"- mlu_visible_devices: `{os.environ.get('MLU_VISIBLE_DEVICES', '(default)')}`",
         "- v1_multiprocessing: `0`",
         f"- accuracy max tokens: `{args.accuracy_max_tokens}`",
@@ -442,6 +445,8 @@ def _run_suite(args: argparse.Namespace) -> None:
                     str(args.max_model_len or 0),
                     "--max-num-batched-tokens",
                     str(args.max_num_batched_tokens or 0),
+                    "--enforce-eager",
+                    str(int(args.enforce_eager)),
                 ],
             )
 
@@ -473,6 +478,8 @@ def _run_suite(args: argparse.Namespace) -> None:
                     str(args.max_model_len or 0),
                     "--max-num-batched-tokens",
                     str(args.max_num_batched_tokens or 0),
+                    "--enforce-eager",
+                    str(int(args.enforce_eager)),
                 ],
             )
 
@@ -500,6 +507,7 @@ def build_parser() -> argparse.ArgumentParser:
     suite_parser.add_argument("--gpu-memory-utilization", type=float, default=0.7)
     suite_parser.add_argument("--max-model-len", type=int, default=None)
     suite_parser.add_argument("--max-num-batched-tokens", type=int, default=None)
+    suite_parser.add_argument("--enforce-eager", type=int, choices=[0, 1], default=0)
     suite_parser.add_argument("--accuracy-max-tokens", type=int, default=64)
     suite_parser.add_argument("--throughput-input-len", type=int, default=64)
     suite_parser.add_argument("--throughput-output-len", type=int, default=64)
@@ -521,6 +529,7 @@ def build_parser() -> argparse.ArgumentParser:
         child_parser.add_argument("--gpu-memory-utilization", type=float, default=0.7)
         child_parser.add_argument("--max-model-len", type=int, default=0)
         child_parser.add_argument("--max-num-batched-tokens", type=int, default=0)
+        child_parser.add_argument("--enforce-eager", type=int, choices=[0, 1], default=0)
 
         if name == "accuracy-child":
             child_parser.add_argument("--max-tokens", type=int, default=64)
