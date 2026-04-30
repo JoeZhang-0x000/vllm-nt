@@ -9,6 +9,7 @@ description = "NineToothed operator plugin for vLLM"
 requires-python = ">=3.10"
 dependencies = [
     "ninetoothed>=0.16.0",
+    "PyYAML",
     "torch",
 ]
 
@@ -17,3 +18,4 @@ vllm_nt = "vllm_nt:register"
 
 [tool.hatch.build.targets.wheel]
 packages = ["vllm_nt"]
+include = ["vllm_nt/configs/*.yaml"]

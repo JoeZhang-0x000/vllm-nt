@@ -1,0 +1,12 @@
+version: 1
+defaults:
+  backend: original
+  fallback_backend: original
+  disable_backend_on_first_failure: true
+ops:
+  StoreKVCache:
+    backend: infinicore
+  PagedAttentionPrefill:
+    backend: infinicore
+  PagedAttentionDecode:
+    backend: infinicore

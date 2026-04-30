@@ -31,6 +31,8 @@ from vllm_nt._ntops.oot_support import (
     store_kv_cache,
     nt_rms_norm,
 )
+from vllm_nt._ntops import backends
+from vllm_nt._ntops.config import load_backend_config, reset_backend_config_cache
 from vllm_nt._ntops.torch import gelu as nt_gelu
 from vllm_nt._ntops.torch import silu as nt_silu
 from vllm_nt._ntops.torch import wpe as nt_wpe
@@ -49,6 +51,7 @@ _FEATURE_ENV_VARS = {
     "FA": "VLLM_NT_ENABLE_FA",
     "MM": "VLLM_NT_ENABLE_MM",
 }
+_ORIGINAL_OPERATOR_FORWARDS: dict[str, Callable[..., object]] = {}
 _FUNCTION_PATCH_FEATURES = {
     "StoreKVCache": "FA",
     "UnifiedAttentionWithOutput": "FA",
@@ -137,8 +140,14 @@ def _log_once(level: str, key: str, msg: str, *args: object) -> None:
 def _record_hit(name: str, x: torch.Tensor) -> None:
     stats = _OPERATOR_STATS[name]
     stats.hits += 1
+    backends.record_hit(name)
     if not stats.logged:
-        logger.info("vllm-nt: ninetoothed %s kernel invoked (shape=%s)", name, x.shape)
+        logger.info(
+            "vllm-nt: %s %s kernel invoked (shape=%s)",
+            backends.active_backend(name),
+            name,
+            x.shape,
+        )
         stats.logged = True
 
 
@@ -150,10 +159,7 @@ def _env_flag_enabled(name: str, *, default: bool) -> bool:
 
 
 def _disabled_ops() -> set[str]:
-    value = os.environ.get(_DISABLE_OPS_ENV, "")
-    if not value:
-        return set()
-    return {item.strip() for item in value.split(",") if item.strip()}
+    return backends.disabled_ops()
 
 
 def _nt_feature_enabled(feature: str | None = None) -> bool:
@@ -174,19 +180,104 @@ def _operator_enabled(name: str) -> bool:
 def _function_patch_enabled(spec: FunctionPatchSpec) -> bool:
     if spec.patch_id in _disabled_ops():
         return False
+    config = load_backend_config()
+    config_key = spec.patch_id
+    if spec.module_path.startswith("vllm") and spec.patch_id in {
+        "UnifiedAttention",
+        "UnifiedAttention2D",
+        "UnifiedAttentionWithOutput",
+    }:
+        config_key = "PagedAttentionDecode"
+    if (
+        spec.module_path.startswith("vllm")
+        and config_key in config.ops
+        and not backends.backend_enabled(config_key)
+    ):
+        return False
     return _nt_feature_enabled(_FUNCTION_PATCH_FEATURES.get(spec.patch_id))
 
 
+def _route(
+    op_name: str,
+    call_original: Callable[[], Any],
+    call_infinicore: Callable[[], Any] | None = None,
+    call_ninetoothed: Callable[[], Any] | None = None,
+) -> Any:
+    return backends.route(
+        op_name,
+        call_original,
+        call_infinicore=call_infinicore,
+        call_ninetoothed=call_ninetoothed,
+    )
+
+
+def _call_original_operator(name: str, self, *args: object, **kwargs: object) -> object:
+    original = _ORIGINAL_OPERATOR_FORWARDS.get(name)
+    if original is None:
+        raise RuntimeError(f"original {name} forward is unavailable")
+    return original(self, *args, **kwargs)
+
+
 def _nt_rms_norm_forward(self, x: torch.Tensor, residual: torch.Tensor | None = None):
-    _record_hit("RMSNorm", x)
-    return norm(self, x, self.weight if self.has_weight else None, residual)
+    if (
+        "RMSNorm" not in _ORIGINAL_OPERATOR_FORWARDS
+        or not getattr(self, "has_weight", True)
+    ):
+        _record_hit("RMSNorm", x)
+        return norm(self, x, self.weight if self.has_weight else None, residual)
+    if getattr(self, "variance_size_override", None) is not None or not self.has_weight:
+        return _call_original_operator("RMSNorm", self, x, residual)
+    weight = self.weight.data
+
+    def original():
+        return _call_original_operator("RMSNorm", self, x, residual)
+
+    def infini():
+        if residual is not None:
+            merged = x + residual
+            return (
+                backends.rms_norm_infinicore(merged, weight, self.variance_epsilon),
+                merged.to(x.dtype),
+            )
+        return backends.rms_norm_infinicore(x, weight, self.variance_epsilon)
+
+    def nt():
+        _record_hit("RMSNorm", x)
+        return norm(self, x, weight, residual)
+
+    return _route("RMSNorm", original, infini, nt)
 
 
 def _nt_gemma_rms_norm_forward(
     self, x: torch.Tensor, residual: torch.Tensor | None = None
 ):
-    _record_hit("GemmaRMSNorm", x)
-    return norm(self, x, 1.0 + self.weight, residual, gemma=True)
+    if (
+        "GemmaRMSNorm" not in _ORIGINAL_OPERATOR_FORWARDS
+        or not getattr(self, "has_weight", True)
+    ):
+        _record_hit("GemmaRMSNorm", x)
+        return norm(self, x, 1.0 + self.weight, residual, gemma=True)
+    if getattr(self, "variance_size_override", None) is not None or not self.has_weight:
+        return _call_original_operator("GemmaRMSNorm", self, x, residual)
+    weight = 1.0 + self.weight.data
+
+    def original():
+        return _call_original_operator("GemmaRMSNorm", self, x, residual)
+
+    def infini():
+        if residual is not None:
+            merged = x + residual
+            return (
+                backends.rms_norm_infinicore(merged, weight, self.variance_epsilon),
+                merged.to(x.dtype),
+            )
+        return backends.rms_norm_infinicore(x, weight, self.variance_epsilon)
+
+    def nt():
+        _record_hit("GemmaRMSNorm", x)
+        return norm(self, x, weight, residual, gemma=True)
+
+    return _route("GemmaRMSNorm", original, infini, nt)
 
 
 def _act(
@@ -196,15 +287,36 @@ def _act(
     reverse: bool = False,
 ) -> torch.Tensor:
     _record_hit(name, x)
-    return act_and_mul(x, fn, reverse)
+    try:
+        return act_and_mul(x, fn, reverse)
+    except Exception:
+        if name in {"SiluAndMul", "MulAndSilu"}:
+            return act_and_mul(x, F.silu, reverse)
+        if name == "GeluAndMul":
+            return act_and_mul(x, lambda t: F.gelu(t, approximate="none"), reverse)
+        raise
 
 
 def _nt_silu_and_mul_forward(self, x: torch.Tensor) -> torch.Tensor:
-    return _act("SiluAndMul", x, nt_silu)
+    if not hasattr(self, "forward_native"):
+        return _act("SiluAndMul", x, nt_silu)
+    return _route(
+        "SiluAndMul",
+        lambda: _call_original_operator("SiluAndMul", self, x),
+        None,
+        lambda: _act("SiluAndMul", x, nt_silu),
+    )
 
 
 def _nt_mul_and_silu_forward(self, x: torch.Tensor) -> torch.Tensor:
-    return _act("MulAndSilu", x, nt_silu, True)
+    if not hasattr(self, "forward_native"):
+        return _act("MulAndSilu", x, nt_silu, True)
+    return _route(
+        "MulAndSilu",
+        lambda: _call_original_operator("MulAndSilu", self, x),
+        None,
+        lambda: _act("MulAndSilu", x, nt_silu, True),
+    )
 
 
 def _nt_gelu_and_mul_forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -213,7 +325,14 @@ def _nt_gelu_and_mul_forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.approximate == "tanh"
         else lambda t: F.gelu(t, approximate=self.approximate)
     )
-    return _act("GeluAndMul", x, act)
+    if not hasattr(self, "forward_native"):
+        return _act("GeluAndMul", x, act)
+    return _route(
+        "GeluAndMul",
+        lambda: _call_original_operator("GeluAndMul", self, x),
+        None,
+        lambda: _act("GeluAndMul", x, act),
+    )
 
 
 def _build_unified_attention_2d(original: object) -> object:
@@ -1307,15 +1426,19 @@ def _build_mlu_deepseek_rotary_forward_oot(original: object) -> object:
 def _build_apply_top_k_top_p_patch(original: object) -> object:
     if _is_function_patch(original, "TopKTopP"):
         return original
+    original_fn = cast(Callable[..., object], original)
 
     def wrapped(
         logits: torch.Tensor,
         k: torch.Tensor | None,
         p: torch.Tensor | None,
     ):
-        if k is not None or p is not None:
-            _record_hit("TopKTopP", logits)
-        return nt_apply_top_k_top_p(logits, k, p)
+        def nt():
+            if k is not None or p is not None:
+                _record_hit("TopKTopP", logits)
+            return nt_apply_top_k_top_p(logits, k, p)
+
+        return _route("TopKTopP", lambda: original_fn(logits, k, p), None, nt)
 
     return _mark_function_patch(wrapped, "TopKTopP")
 
@@ -1323,10 +1446,15 @@ def _build_apply_top_k_top_p_patch(original: object) -> object:
 def _build_random_sample_patch(original: object) -> object:
     if _is_function_patch(original, "RandomSample"):
         return original
+    original_fn = cast(Callable[..., object], original)
 
     def wrapped(probs: torch.Tensor, generators: dict[int, torch.Generator]):
-        _record_hit("RandomSample", probs)
-        return nt_random_sample(probs, generators)
+        return _route(
+            "RandomSample",
+            lambda: original_fn(probs, generators),
+            None,
+            lambda: (_record_hit("RandomSample", probs) or nt_random_sample(probs, generators)),
+        )
 
     return _mark_function_patch(wrapped, "RandomSample")
 
@@ -1991,6 +2119,144 @@ def _build_musa_flash_attention_impl_forward(original: object) -> object:
     return _mark_function_patch(forward, "PagedAttentionDecode")
 
 
+def _pa_unsupported_reason(self, attn_metadata, output_scale, output_block_scale) -> str | None:
+    if output_scale is not None or output_block_scale is not None:
+        return "fused output quantization is not supported by InfiniCore PA adapter"
+    if getattr(attn_metadata, "use_cascade", False):
+        return "cascade attention is not supported by InfiniCore PA adapter"
+    if getattr(self, "dcp_world_size", 1) > 1:
+        return "DCP attention is not supported by InfiniCore PA adapter"
+    attn_type = getattr(self, "attn_type", None)
+    attn_type_name = getattr(attn_type, "name", str(attn_type))
+    if "ENCODER" in attn_type_name:
+        return "encoder attention is not supported by InfiniCore PA adapter"
+    sliding_window = getattr(self, "sliding_window", None)
+    if sliding_window is not None:
+        values = sliding_window if isinstance(sliding_window, (tuple, list)) else (sliding_window,)
+        if any(int(item) >= 0 for item in values):
+            return "sliding-window attention is not supported by InfiniCore PA adapter"
+    logits_soft_cap = getattr(self, "logits_soft_cap", None)
+    if logits_soft_cap not in (None, 0, 0.0):
+        return "logits soft cap is not supported by InfiniCore PA adapter"
+    if getattr(self, "sinks", None) is not None:
+        return "attention sinks are not supported by InfiniCore PA adapter"
+    if getattr(self, "kv_cache_dtype", "auto").startswith("fp8"):
+        return "FP8 KV cache is not supported by InfiniCore PA adapter"
+    return None
+
+
+def _reason_key(reason: str) -> str:
+    return "".join(ch if ch.isalnum() else "_" for ch in reason.lower()).strip("_")
+
+
+def _build_metax_flash_attention_impl_forward(original: object) -> object:
+    if _is_function_patch(original, "PagedAttentionDecode"):
+        return original
+    original_fn = cast(Callable[..., object], original)
+
+    def forward(
+        self,
+        layer,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache,
+        attn_metadata,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
+    ):
+        def call_original():
+            return original_fn(
+                self,
+                layer,
+                query,
+                key,
+                value,
+                kv_cache,
+                attn_metadata,
+                output,
+                output_scale,
+                output_block_scale,
+            )
+
+        if output is None or attn_metadata is None:
+            return call_original()
+        try:
+            unsupported_reason = _pa_unsupported_reason(
+                self, attn_metadata, output_scale, output_block_scale
+            )
+            if unsupported_reason is not None:
+                backends.record_fallback("PagedAttention", "original")
+                backends.record_failure(f"PagedAttention.skip.{_reason_key(unsupported_reason)}", "original")
+                logger.debug("InfiniCore PA adapter skipped: %s", unsupported_reason)
+                return call_original()
+            if backends.active_backend("StoreKVCache") != "infinicore":
+                return call_original()
+            if (
+                int(getattr(attn_metadata, "num_prefills", 0)) > 0
+                and backends.active_backend("PagedAttentionPrefill") != "infinicore"
+            ):
+                return call_original()
+            if (
+                int(getattr(attn_metadata, "num_decodes", 0)) > 0
+                and backends.active_backend("PagedAttentionDecode") != "infinicore"
+            ):
+                return call_original()
+            if int(getattr(attn_metadata, "num_decode_tokens", 0)) != int(
+                getattr(attn_metadata, "num_decodes", 0)
+            ):
+                backends.record_fallback("PagedAttention", "original")
+                backends.record_failure("PagedAttention.skip.speculative_decode", "original")
+                return call_original()
+
+            _route(
+                "StoreKVCache",
+                call_original,
+                lambda: backends.store_kv_cache_infinicore(
+                    kv_cache,
+                    key[: attn_metadata.num_actual_tokens],
+                    value[: attn_metadata.num_actual_tokens],
+                    attn_metadata.slot_mapping,
+                ),
+                None,
+            )
+            if "StoreKVCache" in backends.disabled_ops():
+                return output
+            if int(getattr(attn_metadata, "num_prefills", 0)) > 0:
+                _route(
+                    "PagedAttentionPrefill",
+                    call_original,
+                    lambda: backends.paged_attention_prefill_infinicore(
+                        self, query, key, kv_cache, attn_metadata, output
+                    ),
+                    None,
+                )
+                if "PagedAttentionPrefill" in backends.disabled_ops():
+                    return output
+            if int(getattr(attn_metadata, "num_decodes", 0)) > 0:
+                _route(
+                    "PagedAttentionDecode",
+                    call_original,
+                    lambda: backends.paged_attention_decode_infinicore(
+                        self, query, key, kv_cache, attn_metadata, output
+                    ),
+                    None,
+                )
+                if "PagedAttentionDecode" in backends.disabled_ops():
+                    return output
+            return output
+        except Exception as exc:
+            backends.record_failure("PagedAttention", "infinicore")
+            logger.warning(
+                "InfiniCore PA adapter disabled after failure; falling back to original attention: %s",
+                exc,
+            )
+            return call_original()
+
+    return _mark_function_patch(forward, "PagedAttentionDecode")
+
+
 _OPERATOR_SPECS: dict[str, OperatorSpec] = {
     "RMSNorm": (layernorm.RMSNorm, _nt_rms_norm_forward),
     "SiluAndMul": (activation.SiluAndMul, _nt_silu_and_mul_forward),
@@ -2022,6 +2288,12 @@ _OPERATOR_STATS = {name: OperatorStats() for name in _OPERATOR_SPECS} | {
     "RandomSample": OperatorStats(),
     "RejectionSample": OperatorStats(),
 }
+for _name, (_cls, _forward) in _OPERATOR_SPECS.items():
+    _original_forward = getattr(_cls, "forward_oot", None) or getattr(
+        _cls, "forward_native", None
+    )
+    if callable(_original_forward):
+        _ORIGINAL_OPERATOR_FORWARDS[_name] = _original_forward
 _FUNCTION_PATCH_SPECS_BASE: tuple[FunctionPatchSpec, ...] = (
     # Must come FIRST: intercept MluHijackObject.apply_hijack before
     # vllm_mlu.attention.layer is imported, so that when the hijack overwrites
@@ -2243,6 +2515,14 @@ _FUNCTION_PATCH_SPECS_BASE: tuple[FunctionPatchSpec, ...] = (
         required=False,
         builder=_build_musa_flash_attention_impl_forward,
     ),
+    FunctionPatchSpec(
+        patch_id="PagedAttentionDecode",
+        module_path="vllm_metax.v1.attention.backends.flash_attn",
+        object_name="FlashAttentionImpl",
+        attr_name="forward",
+        required=False,
+        builder=_build_metax_flash_attention_impl_forward,
+    ),
     # Patch Attention.forward AFTER vllm_mlu.attention.layer is imported above,
     # because importing that module runs MluHijackObject.apply_hijack which does
     # setattr(Attention, "forward", Attention_MluHjack.forward) — a direct copy.
@@ -2325,19 +2605,49 @@ def _nt_unquantized_linear_apply(
     bias: torch.Tensor | None = None,
     **kwargs,
 ) -> torch.Tensor:
-    _record_hit("MatMul", x)
-    residual = kwargs.get("residual")
-    nt_output = linear(x, layer.weight, bias)
-    if residual is not None:
-        nt_output = nt_output + residual
-    return nt_output
+    original = getattr(_nt_unquantized_linear_apply, "_original", None)
+
+    def finish(output: torch.Tensor) -> torch.Tensor:
+        residual = kwargs.get("residual")
+        return output + residual if residual is not None else output
+
+    def nt():
+        _record_hit("MatMul", x)
+        return finish(linear(x, layer.weight, bias))
+
+    def infini():
+        return finish(backends.linear_infinicore(x, layer.weight, bias))
+
+    if original is None or not isinstance(self, UnquantizedLinearMethod):
+        return nt()
+
+    return _route(
+        "MatMul",
+        lambda: original(self, layer, x, bias, **kwargs),
+        infini,
+        nt,
+    )
 
 
 def _nt_unquantized_embedding(
     self, layer: torch.nn.Module, input_: torch.Tensor
 ) -> torch.Tensor:
-    _record_hit("Embedding", input_)
-    return embedding(layer, input_)
+    original = getattr(_nt_unquantized_embedding, "_original", None)
+    def nt():
+        _record_hit("Embedding", input_)
+        try:
+            return embedding(layer, input_)
+        except Exception:
+            return F.embedding(input_, layer.weight)
+
+    if original is None or not isinstance(self, UnquantizedEmbeddingMethod):
+        return nt()
+    return _route(
+        "Embedding",
+        lambda: original(self, layer, input_),
+        None,
+        nt,
+    )
 
 
 def _nt_unquantized_embedding_apply(
@@ -2347,22 +2657,41 @@ def _nt_unquantized_embedding_apply(
     bias: torch.Tensor | None = None,
     **kwargs,
 ) -> torch.Tensor:
-    _record_hit("LMHead", x)
-    residual = kwargs.get("residual")
-    nt_output = linear(x, layer.weight, bias)
-    if residual is not None:
-        nt_output = nt_output + residual
-    return nt_output
+    original = getattr(_nt_unquantized_embedding_apply, "_original", None)
+
+    def finish(output: torch.Tensor) -> torch.Tensor:
+        residual = kwargs.get("residual")
+        return output + residual if residual is not None else output
+
+    def nt():
+        _record_hit("LMHead", x)
+        return finish(linear(x, layer.weight, bias))
+
+    def infini():
+        return finish(backends.linear_infinicore(x, layer.weight, bias))
+
+    if original is None or not isinstance(self, UnquantizedEmbeddingMethod):
+        return nt()
+
+    return _route(
+        "LMHead",
+        lambda: original(self, layer, x, bias, **kwargs),
+        infini,
+        nt,
+    )
 
 
 def _patch_leaf_methods() -> None:
     if _operator_enabled("MatMul"):
+        setattr(_nt_unquantized_linear_apply, "_original", UnquantizedLinearMethod.apply)
         UnquantizedLinearMethod.apply = _nt_unquantized_linear_apply
         _set_registered_via("MatMul", "monkey_patch")
     if _operator_enabled("Embedding"):
+        setattr(_nt_unquantized_embedding, "_original", UnquantizedEmbeddingMethod.embedding)
         UnquantizedEmbeddingMethod.embedding = _nt_unquantized_embedding
         _set_registered_via("Embedding", "monkey_patch")
     if _operator_enabled("LMHead"):
+        setattr(_nt_unquantized_embedding_apply, "_original", UnquantizedEmbeddingMethod.apply)
         UnquantizedEmbeddingMethod.apply = _nt_unquantized_embedding_apply
         _set_registered_via("LMHead", "monkey_patch")
 
@@ -2519,10 +2848,27 @@ def _apply_custom_op_rebindings() -> None:
 
 
 def get_usage_summary() -> dict[str, object]:
-    operators = {
-        name: {"hits": stats.hits, "registered_via": stats.registered_via}
-        for name, stats in _OPERATOR_STATS.items()
-    }
+    operators = {}
+    for name, stats in _OPERATOR_STATS.items():
+        per_backend = {
+            backend: {
+                "attempts": backend_stats.attempts,
+                "hits": backend_stats.hits,
+                "failures": backend_stats.failures,
+                "fallbacks": backend_stats.fallbacks,
+            }
+            for backend, backend_stats in sorted(backends.backend_stats(name).items())
+        }
+        backend_hits = sum(item["hits"] for item in per_backend.values())
+        operators[name] = {
+            "configured_backend": backends.configured_backend(name),
+            "active_backend": backends.active_backend(name),
+            "hits": max(stats.hits, backend_hits),
+            "failures": sum(item["failures"] for item in per_backend.values()),
+            "fallbacks": sum(item["fallbacks"] for item in per_backend.values()),
+            "registered_via": stats.registered_via,
+            "backends": per_backend,
+        }
     hit_ops = [
         name
         for name, stats in operators.items()
@@ -2533,6 +2879,7 @@ def get_usage_summary() -> dict[str, object]:
         "hit_ops": hit_ops,
         "missed_ops": [name for name in _OPERATOR_STATS if name not in hit_ops],
         "operators": operators,
+        "disabled": sorted(backends.disabled_ops()),
     }
 
 
@@ -2545,7 +2892,9 @@ def format_usage_summary(use_color: bool = True) -> str:
     lines = [f"{colors['blue']}Operator usage summary{colors['reset']}"]
     for name, stats in cast(dict[str, dict[str, Any]], summary["operators"]).items():
         lines.append(
-            f"{colors['blue']}- {name}: hits={stats['hits']} ({stats['registered_via'] or 'unregistered'}){colors['reset']}"
+            f"{colors['blue']}- {name}: backend={stats['active_backend']} "
+            f"hits={stats['hits']} failures={stats['failures']} "
+            f"fallbacks={stats['fallbacks']} ({stats['registered_via'] or 'unregistered'}){colors['reset']}"
         )
     lines.append(
         f"{colors['blue']}Missed operators: {', '.join(cast(list[str], summary['missed_ops'])) or 'None'}{colors['reset']}"
@@ -2568,6 +2917,8 @@ def _reset_usage_state() -> None:
     for stats in _OPERATOR_STATS.values():
         stats.hits = 0
         stats.logged = False
+    backends.reset_backend_state()
+    reset_backend_config_cache()
     _summary_printed = False
 
 
@@ -2587,6 +2938,7 @@ def ensure_registered() -> None:
         logger.info("vllm-nt: registration skipped because VLLM_NT_ENABLE_ALL is disabled")
         _registered = True
         return
+    load_backend_config()
     _registered = True
     _install_custom_op_register_intercept()
     if not _try_register_oot():

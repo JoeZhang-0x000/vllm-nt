@@ -6,6 +6,12 @@
 # If kernels are imported first, this can trigger a re-entrant torch import
 # during package initialization and fail with duplicate TORCH_LIBRARY
 # registration for the "triton" namespace.
-from vllm_nt._ntops import torch, kernels
+try:
+    from vllm_nt._ntops import torch, kernels
+except ModuleNotFoundError as exc:
+    if exc.name != "torch":
+        raise
+    torch = None
+    kernels = None
 
 __all__ = ["kernels", "torch"]
