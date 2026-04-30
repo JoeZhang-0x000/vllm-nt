@@ -2859,10 +2859,11 @@ def get_usage_summary() -> dict[str, object]:
             }
             for backend, backend_stats in sorted(backends.backend_stats(name).items())
         }
+        backend_hits = sum(item["hits"] for item in per_backend.values())
         operators[name] = {
             "configured_backend": backends.configured_backend(name),
             "active_backend": backends.active_backend(name),
-            "hits": stats.hits,
+            "hits": max(stats.hits, backend_hits),
             "failures": sum(item["failures"] for item in per_backend.values()),
             "fallbacks": sum(item["fallbacks"] for item in per_backend.values()),
             "registered_via": stats.registered_via,

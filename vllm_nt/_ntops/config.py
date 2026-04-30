@@ -94,12 +94,11 @@ def _parse_scalar(value: str) -> object:
         return value.strip("\"'")
 
 
-def _config_path() -> Path:
-    return Path(
-        os.environ.get(_CONFIG_ENV)
-        or os.environ.get(_LEGACY_CONFIG_ENV)
-        or str(_DEFAULT_CONFIG_PATH)
-    )
+def _config_path() -> tuple[Path, bool]:
+    env_val = os.environ.get(_CONFIG_ENV) or os.environ.get(_LEGACY_CONFIG_ENV)
+    if env_val:
+        return Path(env_val), True
+    return _DEFAULT_CONFIG_PATH, False
 
 
 def load_backend_config() -> BackendConfig:
@@ -107,7 +106,12 @@ def load_backend_config() -> BackendConfig:
     if _CONFIG is not None:
         return _CONFIG
 
-    path = _config_path()
+    path, from_env = _config_path()
+    if from_env and not path.exists():
+        raise RuntimeError(
+            f"backend config file not found: {path} "
+            f"(set via {'VLLM_NT_BACKEND_CONFIG' if os.environ.get(_CONFIG_ENV) else 'VLLM_INFINI_PATCH_CONFIG'})"
+        )
     raw = _load_yaml(path) if path.exists() else {}
 
     version = int(raw.get("version", 1))

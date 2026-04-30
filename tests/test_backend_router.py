@@ -146,3 +146,14 @@ ops:
     importlib.reload(backends)
 
     assert backends.active_backend("Embedding") == "original"
+
+
+def test_explicit_config_path_missing_raises(tmp_path, monkeypatch):
+    missing = tmp_path / "nonexistent.yaml"
+    monkeypatch.setenv("VLLM_NT_BACKEND_CONFIG", str(missing))
+    import vllm_nt._ntops.config as config
+
+    config.reset_backend_config_cache()
+
+    with pytest.raises(RuntimeError, match="backend config file not found"):
+        config.load_backend_config()
