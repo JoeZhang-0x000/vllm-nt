@@ -40,7 +40,32 @@ git checkout feat/nt-attention-rope-sdpa
 pip install -e .
 ```
 
-If `vllm_nt` is not discoverable through vLLM's plugin mechanism, keep using explicit import through the script below.
+Confirm the package metadata exposes the vLLM plugin entry point:
+
+```bash
+python scripts/validate_remote_runtime.py --check-plugin-discovery --dump-json
+```
+
+For vLLM's stock OpenAI-compatible server, use the plugin entry point instead of
+rewriting the server:
+
+```bash
+VLLM_PLUGINS=vllm_nt \
+VLLM_NT_ENABLE_STATS=1 \
+vllm serve /path/to/model
+```
+
+If the target runtime already requires vendor plugins, keep those names and add
+`vllm_nt` to the comma-separated list:
+
+```bash
+VLLM_PLUGINS=mlu,mlu_hijack,lora_filesystem_resolver,vllm_nt \
+VLLM_NT_ENABLE_STATS=1 \
+vllm serve /path/to/model
+```
+
+If `vllm_nt` is not discoverable through vLLM's plugin mechanism on the target
+vLLM build, keep using explicit import through the script below or `example.py`.
 
 ## Minimal Runtime Validation
 
