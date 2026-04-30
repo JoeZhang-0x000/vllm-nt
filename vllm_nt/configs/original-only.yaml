@@ -1,0 +1,32 @@
+version: 1
+defaults:
+  backend: original
+  fallback_backend: original
+  disable_backend_on_first_failure: true
+ops:
+  RMSNorm:
+    backend: original
+  GemmaRMSNorm:
+    backend: original
+  SiluAndMul:
+    backend: original
+  ApplyRotaryEmb:
+    backend: original
+  Embedding:
+    backend: original
+  TopKTopP:
+    backend: original
+  RandomSample:
+    backend: original
+  MatMul:
+    backend: original
+  LMHead:
+    backend: original
+  StoreKVCache:
+    backend: original
+  PagedAttentionPrefill:
+    backend: original
+  PagedAttentionDecode:
+    backend: original
+  SDPA:
+    backend: original
