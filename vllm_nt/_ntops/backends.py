@@ -11,6 +11,8 @@ from vllm_nt._ntops.config import config_for
 
 LOG = logging.getLogger("vllm_nt")
 _DISABLE_OPS_ENV = "VLLM_NT_DISABLE_OPS"
+_ENABLE_STATS_ENV = "VLLM_NT_ENABLE_STATS"
+_TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
 @dataclass
@@ -23,6 +25,11 @@ class BackendStats:
 
 _DISABLED: set[str] = set()
 _STATS: dict[str, dict[str, BackendStats]] = {}
+
+
+def stats_enabled() -> bool:
+    value = os.environ.get(_ENABLE_STATS_ENV)
+    return value is not None and value.strip().lower() in _TRUTHY_ENV_VALUES
 
 
 def disabled_ops() -> set[str]:
@@ -53,18 +60,26 @@ def _stats(op_name: str, backend: str) -> BackendStats:
 
 
 def record_attempt(op_name: str, backend: str) -> None:
+    if not stats_enabled():
+        return
     _stats(op_name, backend).attempts += 1
 
 
 def record_hit(op_name: str, backend: str | None = None) -> None:
+    if not stats_enabled():
+        return
     _stats(op_name, backend or active_backend(op_name)).hits += 1
 
 
 def record_failure(op_name: str, backend: str | None = None) -> None:
+    if not stats_enabled():
+        return
     _stats(op_name, backend or active_backend(op_name)).failures += 1
 
 
 def record_fallback(op_name: str, backend: str | None = None) -> None:
+    if not stats_enabled():
+        return
     _stats(op_name, backend or fallback_backend(op_name)).fallbacks += 1
 
 

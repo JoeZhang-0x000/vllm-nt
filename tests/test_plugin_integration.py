@@ -9,6 +9,11 @@ from typing import Any, cast
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _enable_stats_by_default(monkeypatch):
+    monkeypatch.setenv("VLLM_NT_ENABLE_STATS", "1")
+
+
 def _require_runtime():
     pytest.importorskip("torch")
     pytest.importorskip("vllm")
@@ -273,6 +278,37 @@ class TestPluginRegistration:
         assert summary["operators"]["RMSNorm"]["hits"] == 1
         assert "RMSNorm" in summary["hit_ops"]
         assert "SiluAndMul" in summary["missed_ops"]
+
+    def test_usage_summary_is_empty_when_stats_are_disabled(self, monkeypatch):
+        _require_runtime()
+        import torch
+        import vllm_nt._ntops.patching as patching
+
+        monkeypatch.setenv("VLLM_NT_ENABLE_STATS", "0")
+        patching._reset_usage_state()
+
+        patching._record_hit("RMSNorm", torch.ones(1, 4))
+
+        assert patching.get_usage_summary() == {
+            "registered_ops": [],
+            "hit_ops": [],
+            "missed_ops": [],
+            "operators": {},
+            "disabled": [],
+        }
+
+    def test_maybe_print_usage_summary_skips_when_stats_are_disabled(
+        self, monkeypatch, capsys
+    ):
+        _require_runtime()
+        import vllm_nt._ntops.patching as patching
+
+        monkeypatch.setenv("VLLM_NT_ENABLE_STATS", "0")
+        patching._reset_usage_state()
+
+        assert patching.maybe_print_usage_summary(include_empty=True) is False
+        captured = capsys.readouterr()
+        assert captured.err == ""
 
     def test_mlu_topkp_patch_tracks_hits(self):
         _require_runtime()

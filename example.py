@@ -7,6 +7,7 @@ Usage:
 """
 
 import argparse
+import os
 
 DEFAULT_PROMPT = "What is the capital of France?"
 
@@ -25,6 +26,7 @@ def main():
 
     # vllm-nt registers automatically via entry_point,
     # but explicit import ensures it works even without pip install
+    os.environ.setdefault("VLLM_NT_ENABLE_STATS", "1")
     import vllm_nt  # noqa: F401
     from vllm_nt.oot import maybe_print_usage_summary
 

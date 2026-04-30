@@ -38,7 +38,14 @@ def _child_env(args: argparse.Namespace, mode_name: str) -> dict[str, str]:
     env["MLU_VISIBLE_DEVICES"] = args.mlu_visible_devices
     env["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     env["VLLM_NT_MAX_NUM_CONFIGS"] = str(args.max_num_configs)
-    for key in ("VLLM_NT_ENABLE_ALL", "VLLM_NT_ENABLE_FA", "VLLM_NT_ENABLE_MM", "VLLM_NT_DISABLE_OPS", "VLLM_PLUGINS"):
+    env["VLLM_NT_ENABLE_STATS"] = "1"
+    for key in (
+        "VLLM_NT_ENABLE_ALL",
+        "VLLM_NT_ENABLE_FA",
+        "VLLM_NT_ENABLE_MM",
+        "VLLM_NT_DISABLE_OPS",
+        "VLLM_PLUGINS",
+    ):
         env.pop(key, None)
     env.update(MODE_ENVS[mode_name])
     return env
