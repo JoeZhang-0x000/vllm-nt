@@ -28,6 +28,7 @@ def test_default_config_loads_hybrid_default(monkeypatch):
     assert config.config_for("GemmaRMSNorm").backend == "infinicore"
     assert config.config_for("SiluAndMul").backend == "ninetoothed"
     assert config.config_for("ApplyRotaryEmb").backend == "ninetoothed"
+    assert config.config_for("RoPE").backend == "ninetoothed"
     assert config.config_for("Embedding").backend == "ninetoothed"
     assert config.config_for("TopKTopP").backend == "ninetoothed"
     assert config.config_for("RandomSample").backend == "ninetoothed"
@@ -187,6 +188,63 @@ ops:
     importlib.reload(backends)
 
     assert backends.active_backend("Embedding") == "original"
+
+
+def test_rope_uses_apply_rotary_emb_backend_alias(tmp_path, monkeypatch):
+    pytest.importorskip("torch")
+    cfg_path = tmp_path / "backend.yaml"
+    cfg_path.write_text(
+        """
+version: 1
+defaults:
+  backend: original
+  fallback_backend: original
+ops:
+  ApplyRotaryEmb:
+    backend: ninetoothed
+    fallback_backend: original
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("VLLM_NT_BACKEND_CONFIG", str(cfg_path))
+
+    import vllm_nt._ntops.config as config
+    import vllm_nt._ntops.backends as backends
+
+    config.reset_backend_config_cache()
+    backends.reset_backend_state()
+
+    assert backends.configured_backend("RoPE") == "ninetoothed"
+    assert backends.active_backend("RoPE") == "ninetoothed"
+    assert backends.fallback_backend("RoPE") == "original"
+
+
+@pytest.mark.parametrize("disabled_name", ["RoPE", "ApplyRotaryEmb"])
+def test_disable_ops_accepts_rope_aliases(tmp_path, monkeypatch, disabled_name):
+    pytest.importorskip("torch")
+    cfg_path = tmp_path / "backend.yaml"
+    cfg_path.write_text(
+        """
+version: 1
+ops:
+  ApplyRotaryEmb:
+    backend: ninetoothed
+    fallback_backend: original
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("VLLM_NT_BACKEND_CONFIG", str(cfg_path))
+    monkeypatch.setenv("VLLM_NT_DISABLE_OPS", disabled_name)
+
+    import vllm_nt._ntops.config as config
+    import vllm_nt._ntops.backends as backends
+
+    config.reset_backend_config_cache()
+    backends.reset_backend_state()
+
+    assert backends.active_backend("RoPE") == "original"
+    assert "RoPE" in backends.disabled_ops()
+    assert "ApplyRotaryEmb" in backends.disabled_ops()
 
 
 def test_explicit_config_path_missing_raises(tmp_path, monkeypatch):

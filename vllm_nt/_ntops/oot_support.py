@@ -148,10 +148,14 @@ def _apply_rotary(
 
     x_view = x.view(num_tokens, -1, head_size)
     x_rot = x_view[..., :rotary_dim]
+    if cos.ndim == 2:
+        cos = cos.unsqueeze(-2)
+    if sin.ndim == 2:
+        sin = sin.unsqueeze(-2)
     rotated = nt_apply_rotary_emb(x_rot, cos, sin)
 
     if rotary_dim == head_size:
-        return rotated.reshape_as(x)
+        return x
 
     x_pass = x_view[..., rotary_dim:]
     return torch.cat((rotated, x_pass), dim=-1).reshape_as(x)
@@ -181,7 +185,8 @@ def rope(
         sin=sin,
         is_neox_style=is_neox_style,
     )
-    query.copy_(query_out)
+    if query_out is not query:
+        query.copy_(query_out)
 
     if key is not None:
         key_out = _apply_rotary(
@@ -193,7 +198,8 @@ def rope(
             sin=sin,
             is_neox_style=is_neox_style,
         )
-        key.copy_(key_out)
+        if key_out is not key:
+            key.copy_(key_out)
 
     return query, key
 

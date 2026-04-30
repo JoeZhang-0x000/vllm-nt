@@ -9,6 +9,9 @@ _VALID_BACKENDS = {"original", "metax", "ninetoothed", "infinicore"}
 _CONFIG_ENV = "VLLM_NT_BACKEND_CONFIG"
 _LEGACY_CONFIG_ENV = "VLLM_INFINI_PATCH_CONFIG"
 _DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "hybrid-default.yaml"
+_OP_ALIASES = {
+    "RoPE": "ApplyRotaryEmb",
+}
 _CONFIG: "BackendConfig | None" = None
 
 
@@ -169,8 +172,19 @@ def load_backend_config() -> BackendConfig:
     return _CONFIG
 
 
+def canonical_op_name(op_name: str) -> str:
+    return _OP_ALIASES.get(op_name, op_name)
+
+
+def op_name_variants(op_name: str) -> set[str]:
+    canonical = canonical_op_name(op_name)
+    aliases = {alias for alias, target in _OP_ALIASES.items() if target == canonical}
+    return {canonical, *aliases}
+
+
 def config_for(op_name: str) -> OpConfig:
     config = load_backend_config()
+    op_name = canonical_op_name(op_name)
     return config.ops.get(
         op_name,
         OpConfig(
