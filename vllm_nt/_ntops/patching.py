@@ -1655,6 +1655,10 @@ def _build_gpt2_model_forward(original: object) -> object:
     _set_registered_via("WPE", "function_patch")
     _set_registered_via("NTWPEKernel", "function_patch")
     original_fn = cast(Callable[..., object], original)
+    gpt2_mod = importlib.import_module("vllm.model_executor.models.gpt2")
+    get_pp_group = gpt2_mod.get_pp_group
+    islice = gpt2_mod.islice
+    intermediate_tensors_cls = gpt2_mod.IntermediateTensors
 
     def forward(
         self,
@@ -1664,8 +1668,7 @@ def _build_gpt2_model_forward(original: object) -> object:
         inputs_embeds: torch.Tensor | None,
     ):
         try:
-            gpt2_mod = importlib.import_module("vllm.model_executor.models.gpt2")
-            pp_group = gpt2_mod.get_pp_group()
+            pp_group = get_pp_group()
             if pp_group.is_first_rank:
                 if inputs_embeds is None:
                     inputs_embeds = self.embed_input_ids(input_ids)
@@ -1675,11 +1678,11 @@ def _build_gpt2_model_forward(original: object) -> object:
                 assert intermediate_tensors is not None
                 hidden_states = intermediate_tensors["hidden_states"]
 
-            for layer in gpt2_mod.islice(self.h, self.start_layer, self.end_layer):
+            for layer in islice(self.h, self.start_layer, self.end_layer):
                 hidden_states = layer(hidden_states)
 
             if not pp_group.is_last_rank:
-                return gpt2_mod.IntermediateTensors({"hidden_states": hidden_states})
+                return intermediate_tensors_cls({"hidden_states": hidden_states})
 
             return _nt_layer_norm(self.ln_f, hidden_states)
         except Exception:
