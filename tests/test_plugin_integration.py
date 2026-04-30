@@ -216,7 +216,7 @@ class TestPluginRegistration:
         _require_runtime()
         import vllm_nt._ntops.patching as patching
 
-        monkeypatch.setenv("VLLM_NT_DISABLE_OPS", "RMSNorm,RoPE")
+        monkeypatch.setenv("VLLM_NT_DISABLE_OPS", "RMSNorm,ApplyRotaryEmb")
 
         assert not patching._operator_enabled("RMSNorm")
         rope_spec = next(
@@ -224,6 +224,122 @@ class TestPluginRegistration:
         )
         assert not patching._function_patch_enabled(rope_spec)
         assert patching._operator_enabled("SiluAndMul")
+
+    @pytest.mark.parametrize(
+        ("backend", "expected"),
+        [("original", False), ("ninetoothed", True)],
+    )
+    def test_apply_rotary_emb_config_controls_rope_patch(
+        self, tmp_path, monkeypatch, backend, expected
+    ):
+        _require_runtime()
+        import vllm_nt._ntops.config as config
+        import vllm_nt._ntops.patching as patching
+
+        rope_spec = next(
+            spec for spec in patching._FUNCTION_PATCH_SPECS if spec.patch_id == "RoPE"
+        )
+        cfg_path = tmp_path / "backend.yaml"
+        cfg_path.write_text(
+            f"""
+version: 1
+ops:
+  ApplyRotaryEmb:
+    backend: {backend}
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("VLLM_NT_BACKEND_CONFIG", str(cfg_path))
+        config.reset_backend_config_cache()
+
+        assert patching._function_patch_enabled(rope_spec) is expected
+
+    def test_rope_patch_uses_updated_cos_sin_cache(self, tmp_path, monkeypatch):
+        _require_runtime()
+        import torch
+        import vllm_nt._ntops.config as config
+        import vllm_nt._ntops.patching as patching
+
+        cfg_path = tmp_path / "backend.yaml"
+        cfg_path.write_text(
+            """
+version: 1
+ops:
+  ApplyRotaryEmb:
+    backend: ninetoothed
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("VLLM_NT_BACKEND_CONFIG", str(cfg_path))
+        config.reset_backend_config_cache()
+        patching._reset_usage_state()
+
+        class DummyRotary:
+            is_neox_style = True
+            rotary_dim = 2
+            head_size = 2
+
+            def __init__(self):
+                self.cos_sin_cache = torch.ones((4, 4))
+
+            def _match_cos_sin_cache_dtype(self, query):
+                self.cos_sin_cache = self.cos_sin_cache.to(query.dtype)
+                return None
+
+        captured = {}
+
+        def fake_rope(*args, **kwargs):
+            captured["cos_sin_cache"] = kwargs["cos_sin_cache"]
+            return args[1], args[2]
+
+        monkeypatch.setattr(patching, "rope", fake_rope)
+        wrapped = patching._build_rotary_forward_oot(
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("unexpected fallback")
+            )
+        )
+
+        query = torch.zeros((2, 1, 2), dtype=torch.float16)
+        key = torch.zeros_like(query)
+        result = wrapped(DummyRotary(), torch.tensor([0, 1]), query, key)
+        summary = cast(dict[str, Any], patching.get_usage_summary())
+
+        assert result == (query, key)
+        assert captured["cos_sin_cache"].dtype == query.dtype
+        assert summary["operators"]["RoPE"]["active_backend"] == "ninetoothed"
+        assert summary["operators"]["RoPE"]["hits"] == 1
+
+    def test_rope_support_expands_vllm_cos_sin_cache(self, monkeypatch):
+        _require_runtime()
+        import torch
+        import vllm_nt._ntops.oot_support as oot_support
+
+        captured = {}
+
+        def fake_apply_rotary_emb(x, cos, sin):
+            captured["cos_shape"] = tuple(cos.shape)
+            captured["sin_shape"] = tuple(sin.shape)
+            return x
+
+        monkeypatch.setattr(oot_support, "nt_apply_rotary_emb", fake_apply_rotary_emb)
+
+        x = torch.zeros((2, 1, 4), dtype=torch.float32)
+        cos = torch.ones((2, 2), dtype=torch.float32)
+        sin = torch.ones((2, 2), dtype=torch.float32)
+
+        result = oot_support._apply_rotary(
+            x,
+            num_tokens=2,
+            head_size=4,
+            rotary_dim=4,
+            cos=cos,
+            sin=sin,
+            is_neox_style=True,
+        )
+
+        assert captured["cos_shape"] == (2, 1, 2)
+        assert captured["sin_shape"] == (2, 1, 2)
+        assert result is x
 
     def test_usage_summary_auto_discovers_registered_ops(self):
         _require_runtime()

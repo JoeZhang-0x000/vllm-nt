@@ -7,7 +7,7 @@ from typing import Any, Callable
 
 import torch
 
-from vllm_nt._ntops.config import config_for
+from vllm_nt._ntops.config import config_for, op_name_variants
 
 LOG = logging.getLogger("vllm_nt")
 _DISABLE_OPS_ENV = "VLLM_NT_DISABLE_OPS"
@@ -35,7 +35,8 @@ def stats_enabled() -> bool:
 def disabled_ops() -> set[str]:
     value = os.environ.get(_DISABLE_OPS_ENV, "")
     env_disabled = {item.strip() for item in value.split(",") if item.strip()}
-    return _DISABLED | env_disabled
+    disabled = _DISABLED | env_disabled
+    return {variant for item in disabled for variant in op_name_variants(item)}
 
 
 def configured_backend(op_name: str) -> str:

@@ -32,7 +32,11 @@ from vllm_nt._ntops.oot_support import (
     nt_rms_norm,
 )
 from vllm_nt._ntops import backends
-from vllm_nt._ntops.config import load_backend_config, reset_backend_config_cache
+from vllm_nt._ntops.config import (
+    canonical_op_name,
+    load_backend_config,
+    reset_backend_config_cache,
+)
 from vllm_nt._ntops.torch import gelu as nt_gelu
 from vllm_nt._ntops.torch import silu as nt_silu
 from vllm_nt._ntops.torch import wpe as nt_wpe
@@ -183,7 +187,7 @@ def _function_patch_enabled(spec: FunctionPatchSpec) -> bool:
     if spec.patch_id in _disabled_ops():
         return False
     config = load_backend_config()
-    config_key = spec.patch_id
+    config_key = canonical_op_name(spec.patch_id)
     if spec.module_path.startswith("vllm") and spec.patch_id in {
         "UnifiedAttention",
         "UnifiedAttention2D",
@@ -1328,10 +1332,10 @@ def _build_rotary_forward_oot(original: object) -> object:
         if not self.is_neox_style or self.rotary_dim % 2:
             return original_fn(self, positions, query, key)
 
-        _record_hit("RoPE", query)
-        try:
-            cos_sin_cache = self._match_cos_sin_cache_dtype(query)
-            return rope(
+        def nt():
+            self._match_cos_sin_cache_dtype(query)
+            cos_sin_cache = self.cos_sin_cache
+            result = rope(
                 positions,
                 query,
                 key,
@@ -1340,8 +1344,10 @@ def _build_rotary_forward_oot(original: object) -> object:
                 rotary_dim=self.rotary_dim,
                 is_neox_style=self.is_neox_style,
             )
-        except Exception:
-            return original_fn(self, positions, query, key)
+            _record_hit("RoPE", query)
+            return result
+
+        return _route("RoPE", lambda: original_fn(self, positions, query, key), None, nt)
 
     return _mark_function_patch(forward_oot, "RoPE")
 
@@ -1364,10 +1370,10 @@ def _build_mlu_rotary_forward_oot(original: object) -> object:
         if not getattr(self, "is_neox_style", False) or rotary_dim % 2:
             return original_fn(self, positions, x, offsets)
 
-        _record_hit("RoPE", x)
-        try:
+        def nt():
             rope_positions = positions if offsets is None else (positions + offsets)
-            cos_sin_cache = self._match_cos_sin_cache_dtype(x)
+            self._match_cos_sin_cache_dtype(x)
+            cos_sin_cache = self.cos_sin_cache
             out, _ = rope(
                 rope_positions,
                 x,
@@ -1377,9 +1383,10 @@ def _build_mlu_rotary_forward_oot(original: object) -> object:
                 rotary_dim=rotary_dim,
                 is_neox_style=self.is_neox_style,
             )
+            _record_hit("RoPE", x)
             return out
-        except Exception:
-            return original_fn(self, positions, x, offsets)
+
+        return _route("RoPE", lambda: original_fn(self, positions, x, offsets), None, nt)
 
     return _mark_function_patch(forward_oot, "RoPE")
 
@@ -1406,11 +1413,11 @@ def _build_mlu_deepseek_rotary_forward_oot(original: object) -> object:
         if not getattr(self, "is_neox_style", False) or rotary_dim % 2:
             return original_fn(self, positions, query, key, offsets, only_prefill, only_decode)
 
-        _record_hit("RoPE", base)
-        try:
+        def nt():
             rope_positions = positions if offsets is None else (positions + offsets)
-            cos_sin_cache = self._match_cos_sin_cache_dtype(base)
-            return rope(
+            self._match_cos_sin_cache_dtype(base)
+            cos_sin_cache = self.cos_sin_cache
+            result = rope(
                 rope_positions,
                 query,
                 key,
@@ -1419,8 +1426,17 @@ def _build_mlu_deepseek_rotary_forward_oot(original: object) -> object:
                 rotary_dim=rotary_dim,
                 is_neox_style=self.is_neox_style,
             )
-        except Exception:
-            return original_fn(self, positions, query, key, offsets, only_prefill, only_decode)
+            _record_hit("RoPE", base)
+            return result
+
+        return _route(
+            "RoPE",
+            lambda: original_fn(
+                self, positions, query, key, offsets, only_prefill, only_decode
+            ),
+            None,
+            nt,
+        )
 
     return _mark_function_patch(forward_oot, "RoPE")
 
