@@ -101,6 +101,7 @@ ops:
         encoding="utf-8",
     )
     monkeypatch.setenv("VLLM_NT_BACKEND_CONFIG", str(cfg_path))
+    monkeypatch.setenv("VLLM_NT_ENABLE_STATS", "1")
 
     import vllm_nt._ntops.config as config
     import vllm_nt._ntops.backends as backends
@@ -120,6 +121,46 @@ ops:
     stats = backends.backend_stats("MatMul")
     assert stats["infinicore"].attempts == 1
     assert stats["infinicore"].failures == 1
+
+
+def test_router_stats_disabled_by_default_but_fallback_still_disables_backend(
+    tmp_path, monkeypatch
+):
+    pytest.importorskip("torch")
+    cfg_path = tmp_path / "backend.yaml"
+    cfg_path.write_text(
+        """
+version: 1
+defaults:
+  backend: original
+  fallback_backend: original
+ops:
+  MatMul:
+    backend: infinicore
+    fallback_backend: ninetoothed
+    disable_backend_on_first_failure: true
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("VLLM_NT_BACKEND_CONFIG", str(cfg_path))
+    monkeypatch.delenv("VLLM_NT_ENABLE_STATS", raising=False)
+
+    import vllm_nt._ntops.config as config
+    import vllm_nt._ntops.backends as backends
+
+    config.reset_backend_config_cache()
+    backends.reset_backend_state()
+
+    result = backends.route(
+        "MatMul",
+        lambda: "original",
+        call_infinicore=lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+        call_ninetoothed=lambda: "nt",
+    )
+
+    assert result == "nt"
+    assert backends.active_backend("MatMul") == "ninetoothed"
+    assert backends.backend_stats("MatMul") == {}
 
 
 def test_disable_ops_forces_fallback(tmp_path, monkeypatch):

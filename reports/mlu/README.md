@@ -13,6 +13,7 @@
    - `VLLM_NT_ENABLE_FA`
    - `VLLM_NT_ENABLE_MM`
    - `VLLM_NT_DISABLE_OPS=...`
+   - `VLLM_NT_ENABLE_STATS=1`（仅在需要 hit 追踪/summary 时开启）
 2. 修复了 `MatMul/Linear` 默认固定 `BLOCK_SIZE_M/N/K=64` 导致 MM 没走到官方 autotune 路径的问题。
 3. 为常见 last-dim RMSNorm 增加 fused fast path，使 `vllm-nt` 当前实现对齐官方 `fused_rms_norm` 的表现。
 4. 用最终版脚本重跑三类实验：

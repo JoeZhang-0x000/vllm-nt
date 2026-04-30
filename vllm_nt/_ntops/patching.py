@@ -138,6 +138,8 @@ def _log_once(level: str, key: str, msg: str, *args: object) -> None:
 
 
 def _record_hit(name: str, x: torch.Tensor) -> None:
+    if not backends.stats_enabled():
+        return
     stats = _OPERATOR_STATS[name]
     stats.hits += 1
     backends.record_hit(name)
@@ -2848,6 +2850,14 @@ def _apply_custom_op_rebindings() -> None:
 
 
 def get_usage_summary() -> dict[str, object]:
+    if not backends.stats_enabled():
+        return {
+            "registered_ops": [],
+            "hit_ops": [],
+            "missed_ops": [],
+            "operators": {},
+            "disabled": [],
+        }
     operators = {}
     for name, stats in _OPERATOR_STATS.items():
         per_backend = {
@@ -2904,6 +2914,8 @@ def format_usage_summary(use_color: bool = True) -> str:
 
 def maybe_print_usage_summary(*, include_empty: bool = False) -> bool:
     global _summary_printed
+    if not backends.stats_enabled():
+        return False
     summary = get_usage_summary()
     if _summary_printed or (not include_empty and not summary["hit_ops"]):
         return False
