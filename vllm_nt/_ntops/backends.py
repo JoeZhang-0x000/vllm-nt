@@ -99,17 +99,22 @@ def _call_backend(
     call_original: Callable[[], Any],
     call_infinicore: Callable[[], Any] | None,
     call_ninetoothed: Callable[[], Any] | None,
+    call_infinicore_flash_attn: Callable[[], Any] | None,
 ) -> Any:
     if backend == "original":
         record_fallback(op_name, backend)
         return call_original()
 
-    fn = call_infinicore if backend == "infinicore" else call_ninetoothed
+    fn = {
+        "infinicore": call_infinicore,
+        "infinicore-flash-attn": call_infinicore_flash_attn,
+        "ninetoothed": call_ninetoothed,
+    }.get(backend)
     if fn is None:
         raise RuntimeError(f"{op_name} has no adapter for backend {backend}")
     record_attempt(op_name, backend)
     result = fn()
-    if backend == "infinicore":
+    if backend.startswith("infinicore"):
         record_hit(op_name, backend)
     return result
 
@@ -120,12 +125,18 @@ def route(
     *,
     call_infinicore: Callable[[], Any] | None = None,
     call_ninetoothed: Callable[[], Any] | None = None,
+    call_infinicore_flash_attn: Callable[[], Any] | None = None,
 ) -> Any:
     cfg = config_for(op_name)
     backend = active_backend(op_name)
     try:
         return _call_backend(
-            op_name, backend, call_original, call_infinicore, call_ninetoothed
+            op_name,
+            backend,
+            call_original,
+            call_infinicore,
+            call_ninetoothed,
+            call_infinicore_flash_attn,
         )
     except Exception as exc:
         record_failure(op_name, backend)
@@ -146,6 +157,7 @@ def route(
             call_original,
             call_infinicore,
             call_ninetoothed,
+            call_infinicore_flash_attn,
         )
 
 
@@ -210,6 +222,22 @@ def pa_cache_views(kv_cache: torch.Tensor, key: torch.Tensor):
     raise RuntimeError(f"cannot infer KV cache layout from key={key.shape}, cache={key_cache.shape}")
 
 
+def flash_attn_cache_views(kv_cache: torch.Tensor, key: torch.Tensor):
+    key_cache, value_cache = kv_cache.unbind(0)
+    if key_cache.ndim != 4 or value_cache.ndim != 4:
+        raise RuntimeError(
+            f"expected 4D paged KV cache tensors, got {key_cache.shape}/{value_cache.shape}"
+        )
+    num_kv_heads = key.shape[1]
+    if key_cache.shape[2] == num_kv_heads:
+        return as_infini_strided(key_cache), as_infini_strided(value_cache)
+    if key_cache.shape[1] == num_kv_heads:
+        return as_infini_strided(key_cache.permute(0, 2, 1, 3)), as_infini_strided(
+            value_cache.permute(0, 2, 1, 3)
+        )
+    raise RuntimeError(f"cannot infer KV cache layout from key={key.shape}, cache={key_cache.shape}")
+
+
 def prefill_total_lens(attn_metadata) -> torch.Tensor:
     cu_prefix_kv_lens = getattr(attn_metadata, "cu_prefix_kv_lens", None)
     if cu_prefix_kv_lens is not None:
@@ -227,6 +255,16 @@ def prefill_total_lens(attn_metadata) -> torch.Tensor:
     raise RuntimeError(
         f"cannot derive prefill total lengths from seq_lens={seq_lens.shape}, "
         f"num_decodes={num_decodes}, num_prefills={num_prefills}"
+    )
+
+
+def prefill_cu_kv_lens(attn_metadata) -> torch.Tensor:
+    cu_prefix_kv_lens = getattr(attn_metadata, "cu_prefix_kv_lens", None)
+    if cu_prefix_kv_lens is not None:
+        return cu_prefix_kv_lens.to(torch.int32)
+    return torch.nn.functional.pad(
+        torch.cumsum(prefill_total_lens(attn_metadata).to(torch.int32), dim=0),
+        (1, 0),
     )
 
 
@@ -307,6 +345,95 @@ def paged_attention_decode_infinicore(
         value_cache,
         as_infini(attn_metadata.decode_block_table),
         as_infini(attn_metadata.decode_seq_lens),
+        as_infini(self.alibi_slopes) if self.alibi_slopes is not None else None,
+        self.scale,
+        out=as_infini(out),
+    )
+
+
+def _max_tensor_item(tensor: torch.Tensor) -> int:
+    if tensor.numel() == 0:
+        return 0
+    return int(tensor.max().item())
+
+
+def prefill_max_query_len(attn_metadata, q: torch.Tensor) -> int:
+    max_seq_len = getattr(attn_metadata, "prefill_max_seq_len", None)
+    if max_seq_len is not None:
+        return int(max_seq_len)
+    query_start_loc = getattr(attn_metadata, "prefill_query_start_loc", None)
+    if query_start_loc is None or query_start_loc.numel() < 2:
+        return int(q.shape[0])
+    return _max_tensor_item(query_start_loc[1:] - query_start_loc[:-1])
+
+
+def prefill_max_kv_len(total_lens: torch.Tensor) -> int:
+    return _max_tensor_item(total_lens)
+
+
+def flash_attn_prefill_infinicore(
+    self,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    kv_cache: torch.Tensor,
+    attn_metadata,
+    output: torch.Tensor,
+) -> None:
+    import infinicore
+
+    key_cache, value_cache = flash_attn_cache_views(kv_cache, key)
+    num_decode_tokens = int(getattr(attn_metadata, "num_decode_tokens", 0))
+    num_actual_tokens = int(attn_metadata.num_actual_tokens)
+    q = query[num_decode_tokens:num_actual_tokens]
+    if q.numel() == 0:
+        return
+
+    cu_kv_lens = prefill_cu_kv_lens(attn_metadata)
+    out = output[num_decode_tokens:num_actual_tokens].view(q.shape)
+    infinicore.mha_varlen(
+        as_infini(q),
+        key_cache,
+        value_cache,
+        as_infini(attn_metadata.prefill_query_start_loc),
+        as_infini(cu_kv_lens),
+        as_infini(attn_metadata.prefill_block_table),
+        prefill_max_query_len(attn_metadata, q),
+        prefill_max_kv_len(cu_kv_lens[1:] - cu_kv_lens[:-1]),
+        as_infini(self.alibi_slopes) if self.alibi_slopes is not None else None,
+        self.scale,
+        out=as_infini(out),
+    )
+
+
+def flash_attn_decode_infinicore(
+    self,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    kv_cache: torch.Tensor,
+    attn_metadata,
+    output: torch.Tensor,
+) -> None:
+    import infinicore
+
+    num_decode_tokens = int(getattr(attn_metadata, "num_decode_tokens", 0))
+    num_decodes = int(getattr(attn_metadata, "num_decodes", 0))
+    if num_decode_tokens == 0:
+        return
+    if num_decode_tokens != num_decodes:
+        raise RuntimeError(
+            "speculative decode is not supported by InfiniCore flash-attn adapter: "
+            f"tokens={num_decode_tokens}, decodes={num_decodes}"
+        )
+
+    key_cache, value_cache = flash_attn_cache_views(kv_cache, key)
+    q = query[:num_decode_tokens].view(num_decode_tokens, 1, query.shape[1], query.shape[2])
+    out = output[:num_decode_tokens].view(q.shape)
+    infinicore.mha_kvcache(
+        as_infini(q),
+        key_cache,
+        value_cache,
+        as_infini(attn_metadata.decode_seq_lens),
+        as_infini(attn_metadata.decode_block_table),
         as_infini(self.alibi_slopes) if self.alibi_slopes is not None else None,
         self.scale,
         out=as_infini(out),

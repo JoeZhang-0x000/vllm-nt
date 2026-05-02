@@ -583,6 +583,101 @@ ops:
         assert summary["operators"]["PagedAttentionDecode"]["hits"] == 1
         assert summary["operators"]["PagedAttentionPrefill"]["hits"] == 1
 
+    def test_metax_flash_attention_impl_forward_can_route_to_flash_attn_backend(
+        self, tmp_path, monkeypatch
+    ):
+        _require_runtime()
+        import torch
+        import vllm_nt._ntops.backends as backends
+        import vllm_nt._ntops.config as config
+        import vllm_nt._ntops.patching as patching
+
+        cfg_path = tmp_path / "backend.yaml"
+        cfg_path.write_text(
+            """
+version: 1
+ops:
+  StoreKVCache:
+    backend: infinicore
+  PagedAttentionPrefill:
+    backend: infinicore-flash-attn
+  PagedAttentionDecode:
+    backend: infinicore-flash-attn
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("VLLM_NT_BACKEND_CONFIG", str(cfg_path))
+        config.reset_backend_config_cache()
+        backends.reset_backend_state()
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            backends,
+            "store_kv_cache_infinicore",
+            lambda *args, **kwargs: calls.append("store"),
+        )
+        monkeypatch.setattr(
+            backends,
+            "paged_attention_prefill_infinicore",
+            lambda *args, **kwargs: calls.append("paged-prefill"),
+        )
+        monkeypatch.setattr(
+            backends,
+            "paged_attention_decode_infinicore",
+            lambda *args, **kwargs: calls.append("paged-decode"),
+        )
+        monkeypatch.setattr(
+            backends,
+            "flash_attn_prefill_infinicore",
+            lambda *args, **kwargs: calls.append("flash-prefill"),
+        )
+        monkeypatch.setattr(
+            backends,
+            "flash_attn_decode_infinicore",
+            lambda *args, **kwargs: calls.append("flash-decode"),
+        )
+
+        class DummyImpl:
+            dcp_world_size = 1
+            attn_type = None
+            sliding_window = None
+            logits_soft_cap = 0
+            sinks = None
+            kv_cache_dtype = "auto"
+
+        class DummyMetadata:
+            num_actual_tokens = 3
+            num_decode_tokens = 1
+            num_decodes = 1
+            num_prefills = 1
+            slot_mapping = torch.tensor([0, 1, 2], dtype=torch.int64)
+
+        wrapped = patching._build_metax_flash_attention_impl_forward(
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("unexpected fallback")
+            )
+        )
+
+        query = torch.zeros((3, 1, 2), dtype=torch.float32)
+        key = torch.zeros_like(query)
+        value = torch.zeros_like(query)
+        kv_cache = torch.zeros((2, 4, 2, 1, 2), dtype=torch.float32)
+        output = torch.zeros_like(query)
+
+        result = wrapped(
+            DummyImpl(),
+            object(),
+            query,
+            key,
+            value,
+            kv_cache,
+            DummyMetadata(),
+            output,
+        )
+
+        assert result is output
+        assert calls == ["store", "flash-prefill", "flash-decode"]
+
     def test_qwen2_mlp_patch_tracks_silu_and_mul_hits(self):
         _require_runtime()
         import torch

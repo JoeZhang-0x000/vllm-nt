@@ -8,6 +8,19 @@ from pathlib import Path
 MODELS_ROOT = Path("/data02/jiangqiu/models")
 DOWN_MODELS = MODELS_ROOT / "down_models.sh"
 DEFAULT_PROMPT = "In one short sentence, explain what the moon is."
+DEFAULT_LONG_PROMPT = (
+    "You are validating an attention backend. "
+    "Write a clear, technical response in three short paragraphs. "
+    "First, explain why prefill and decode are different execution phases in a "
+    "decoder-only transformer. "
+    "Second, describe what can go wrong if the prompt length is large enough to "
+    "exercise the prefill path but the implementation still assumes decode-only "
+    "shapes. "
+    "Third, summarize how you would confirm that both prefill and decode are "
+    "actually being exercised during a runtime smoke test. "
+    "Be specific about tensor shapes, cache metadata, and routing signals. "
+    "Do not use bullet points."
+)
 DEFAULT_BATCH_SIZES = {
     "gpt2": 256,
     "Llama-2-7b-chat-hf": 128,

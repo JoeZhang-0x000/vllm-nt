@@ -5,7 +5,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-_VALID_BACKENDS = {"original", "metax", "ninetoothed", "infinicore"}
+_VALID_BACKENDS = {
+    "original",
+    "metax",
+    "ninetoothed",
+    "infinicore",
+    "infinicore-flash-attn",
+}
 _CONFIG_ENV = "VLLM_NT_BACKEND_CONFIG"
 _LEGACY_CONFIG_ENV = "VLLM_INFINI_PATCH_CONFIG"
 _DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "configs" / "hybrid-default.yaml"

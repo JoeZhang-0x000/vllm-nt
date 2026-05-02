@@ -11,12 +11,19 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from _model_utils import DEFAULT_PROMPT, select_models
+try:
+    from _model_utils import DEFAULT_LONG_PROMPT, DEFAULT_PROMPT, select_models
+except ModuleNotFoundError:
+    from scripts._model_utils import DEFAULT_LONG_PROMPT, DEFAULT_PROMPT, select_models
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT = REPO_ROOT / "reports" / "mlu" / "correctness_by_model.md"
 RESULT_PREFIX = "RESULT_JSON="
+PROMPT_PROFILES = {
+    "short": DEFAULT_PROMPT,
+    "long": DEFAULT_LONG_PROMPT,
+}
 MODE_ENVS = {
     "native": {
         "VLLM_PLUGINS": "mlu,mlu_hijack,lora_filesystem_resolver",
@@ -52,6 +59,7 @@ def _child_env(args: argparse.Namespace, mode_name: str) -> dict[str, str]:
 
 
 def _run_child(args: argparse.Namespace, model_path: str, mode_name: str) -> dict[str, Any]:
+    prompt = _resolve_prompt(args)
     cmd = [
         sys.executable,
         str(Path(__file__).resolve()),
@@ -61,9 +69,11 @@ def _run_child(args: argparse.Namespace, model_path: str, mode_name: str) -> dic
         "--mode-name",
         mode_name,
         "--prompt",
-        args.prompt,
+        prompt,
         "--max-tokens",
         str(args.max_tokens),
+        "--batch-size",
+        str(args.batch_size),
         "--dtype",
         args.dtype,
         "--tensor-parallel-size",
@@ -101,7 +111,9 @@ def _render_report(args: argparse.Namespace, rows: list[dict[str, Any]]) -> str:
         "# Model Correctness and Hit Tracking on MLU",
         "",
         "## Configuration",
-        f"- prompt: `{args.prompt}`",
+        f"- prompt_profile: `{args.prompt_profile}`",
+        f"- prompt: `{_resolve_prompt(args)}`",
+        f"- batch_size: `{args.batch_size}`",
         f"- max_tokens: `{args.max_tokens}`",
         f"- dtype: `{args.dtype}`",
         f"- enforce_eager: `1`",
@@ -118,7 +130,7 @@ def _render_report(args: argparse.Namespace, rows: list[dict[str, Any]]) -> str:
             [
                 f"## `{model_name}`",
                 f"- model path: `{native['model_path']}`",
-                f"- prompt: `{args.prompt}`",
+                f"- prompt: `{_resolve_prompt(args)}`",
                 f"- native output: `{native['output']}`",
                 f"- NT_ALL_ON output: `{nt['output']}`",
                 f"- NT hit_ops: `{', '.join(usage['hit_ops']) or 'None'}`",
@@ -132,6 +144,16 @@ def _render_report(args: argparse.Namespace, rows: list[dict[str, Any]]) -> str:
                 lines.append(f"| {op_name} | {op_stats['hits']} |")
         lines.append("")
     return "\n".join(lines)
+
+
+def _resolve_prompt(args: argparse.Namespace) -> str:
+    if getattr(args, "prompt", None):
+        return args.prompt
+    profile = getattr(args, "prompt_profile", "short")
+    try:
+        return PROMPT_PROFILES[profile]
+    except KeyError as exc:
+        raise RuntimeError(f"unknown prompt profile: {profile}") from exc
 
 
 def _run_parent(args: argparse.Namespace) -> None:
@@ -169,11 +191,17 @@ def _run_generate_child(args: argparse.Namespace) -> None:
         trust_remote_code=True,
         enforce_eager=bool(args.enforce_eager),
     )
-    outputs = llm.generate([args.prompt], SamplingParams(temperature=0.0, top_p=1.0, max_tokens=args.max_tokens))
+    prompt = _resolve_prompt(args)
+    prompts = [prompt] * args.batch_size
+    outputs = llm.generate(
+        prompts,
+        SamplingParams(temperature=0.0, top_p=1.0, max_tokens=args.max_tokens),
+    )
     payload = {
         "mode_name": args.mode_name,
         "model_path": args.model,
         "output": outputs[0].outputs[0].text,
+        "batch_size": args.batch_size,
         "usage_summary": get_usage_summary() if get_usage_summary is not None else None,
     }
     print(f"{RESULT_PREFIX}{json.dumps(payload, ensure_ascii=False)}")
@@ -186,7 +214,9 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser = subparsers.add_parser("run")
     run_parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     run_parser.add_argument("--mlu-visible-devices", default="1")
-    run_parser.add_argument("--prompt", default=DEFAULT_PROMPT)
+    run_parser.add_argument("--prompt", default=None)
+    run_parser.add_argument("--prompt-profile", choices=sorted(PROMPT_PROFILES), default="short")
+    run_parser.add_argument("--batch-size", type=int, default=1)
     run_parser.add_argument("--max-tokens", type=int, default=32)
     run_parser.add_argument("--dtype", default="bfloat16")
     run_parser.add_argument("--tensor-parallel-size", type=int, default=1)
@@ -199,7 +229,9 @@ def build_parser() -> argparse.ArgumentParser:
     child = subparsers.add_parser("generate-child")
     child.add_argument("--model", required=True)
     child.add_argument("--mode-name", choices=sorted(MODE_ENVS), required=True)
-    child.add_argument("--prompt", required=True)
+    child.add_argument("--prompt", default=None)
+    child.add_argument("--prompt-profile", choices=sorted(PROMPT_PROFILES), default="short")
+    child.add_argument("--batch-size", type=int, default=1)
     child.add_argument("--max-tokens", type=int, default=32)
     child.add_argument("--dtype", default="bfloat16")
     child.add_argument("--tensor-parallel-size", type=int, default=1)
