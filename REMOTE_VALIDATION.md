@@ -29,6 +29,31 @@ This document covers the accelerator-backed validation that cannot be completed 
   - `vllm_nt`
 - A small model for iteration speed
 
+Known MetaX validation host:
+
+```bash
+ssh -p 30467 root@ssh.v5000-prod-gw.nhss.zhejianglab.com
+```
+
+On that host, use `/opt/conda/bin/python` for non-interactive commands; the default
+SSH `PATH` may not include `python`.
+
+Recommended MetaX environment:
+
+```bash
+export MACA_HOME=/opt/maca-3.5.3
+export MACA_PATH=/opt/maca-3.5.3
+export LD_LIBRARY_PATH=/root/.infini/lib:$MACA_PATH/lib:$MACA_PATH/lib64:${LD_LIBRARY_PATH:-}
+export PYTHONPATH=/root/vllm-nt:${PYTHONPATH:-}
+```
+
+When validating attention routing with `vllm_metax`, disable vLLM-NT's base OOT
+operator registrations to avoid duplicate names with the platform plugin:
+
+```bash
+export VLLM_NT_DISABLE_OPS=RMSNorm,SiluAndMul,MulAndSilu,GeluAndMul,GemmaRMSNorm
+```
+
 ## Setup
 
 From the remote machine:
@@ -41,6 +66,64 @@ pip install -e .
 ```
 
 If `vllm_nt` is not discoverable through vLLM's plugin mechanism, keep using explicit import through the script below.
+
+## InfiniCore Attention Configs
+
+Native InfiniCore paged attention:
+
+```bash
+export VLLM_NT_BACKEND_CONFIG=/path/to/vllm-nt/vllm_nt/configs/pa-infinicore.yaml
+```
+
+InfiniCore Flash-Attn wrapper path (`mha_varlen` / `mha_kvcache`):
+
+```bash
+export VLLM_NT_BACKEND_CONFIG=/path/to/vllm-nt/vllm_nt/configs/pa-infinicore-flash-attn.yaml
+```
+
+All-infinicore-nt plus Flash-Attn wrapper attention:
+
+```bash
+export VLLM_NT_BACKEND_CONFIG=/path/to/vllm-nt/vllm_nt/configs/all-infinicore-nt-fa2.yaml
+```
+
+These attention configs keep `StoreKVCache` on `infinicore`; only
+prefill/decode attention routing differs.
+
+The Flash-Attn config has been smoke-tested with:
+
+```bash
+/mnt/geogpt-doc-new/default/xb/qwen3-0.6B
+```
+
+Expected signal for a short decode-heavy prompt:
+
+```text
+PagedAttentionDecode: backend=infinicore-flash-attn hits > 0 failures=0
+```
+
+For the Flash-Attn wrapper, also run a longer prompt so prefill is forced through
+the same route:
+
+```bash
+python scripts/run_inference_validation.py run \
+  --models qwen3-0.6B \
+  --prompt-profile long \
+  --batch-size 2 \
+  --max-tokens 64 \
+  --dtype bfloat16
+```
+
+Pass condition:
+
+```text
+PagedAttentionPrefill: backend=infinicore-flash-attn hits > 0 failures=0
+PagedAttentionDecode: backend=infinicore-flash-attn hits > 0 failures=0
+```
+
+If generation succeeds but `PagedAttentionPrefill` remains at `hits=0`, the run
+only validates decode. In that case, keep increasing request shape coverage
+instead of treating the Flash-Attn prefill adapter as validated.
 
 ## Minimal Runtime Validation
 

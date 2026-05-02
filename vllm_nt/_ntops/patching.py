@@ -208,12 +208,14 @@ def _route(
     call_original: Callable[[], Any],
     call_infinicore: Callable[[], Any] | None = None,
     call_ninetoothed: Callable[[], Any] | None = None,
+    call_infinicore_flash_attn: Callable[[], Any] | None = None,
 ) -> Any:
     return backends.route(
         op_name,
         call_original,
         call_infinicore=call_infinicore,
         call_ninetoothed=call_ninetoothed,
+        call_infinicore_flash_attn=call_infinicore_flash_attn,
     )
 
 
@@ -2213,12 +2215,14 @@ def _build_metax_flash_attention_impl_forward(original: object) -> object:
                 return call_original()
             if (
                 int(getattr(attn_metadata, "num_prefills", 0)) > 0
-                and backends.active_backend("PagedAttentionPrefill") != "infinicore"
+                and backends.active_backend("PagedAttentionPrefill")
+                not in {"infinicore", "infinicore-flash-attn"}
             ):
                 return call_original()
             if (
                 int(getattr(attn_metadata, "num_decodes", 0)) > 0
-                and backends.active_backend("PagedAttentionDecode") != "infinicore"
+                and backends.active_backend("PagedAttentionDecode")
+                not in {"infinicore", "infinicore-flash-attn"}
             ):
                 return call_original()
             if int(getattr(attn_metadata, "num_decode_tokens", 0)) != int(
@@ -2248,7 +2252,9 @@ def _build_metax_flash_attention_impl_forward(original: object) -> object:
                     lambda: backends.paged_attention_prefill_infinicore(
                         self, query, key, kv_cache, attn_metadata, output
                     ),
-                    None,
+                    call_infinicore_flash_attn=lambda: backends.flash_attn_prefill_infinicore(
+                        self, query, key, kv_cache, attn_metadata, output
+                    ),
                 )
                 if "PagedAttentionPrefill" in backends.disabled_ops():
                     return output
@@ -2259,7 +2265,9 @@ def _build_metax_flash_attention_impl_forward(original: object) -> object:
                     lambda: backends.paged_attention_decode_infinicore(
                         self, query, key, kv_cache, attn_metadata, output
                     ),
-                    None,
+                    call_infinicore_flash_attn=lambda: backends.flash_attn_decode_infinicore(
+                        self, query, key, kv_cache, attn_metadata, output
+                    ),
                 )
                 if "PagedAttentionDecode" in backends.disabled_ops():
                     return output
