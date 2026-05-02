@@ -106,8 +106,14 @@ InfiniCore Flash-Attn wrapper path (`mha_varlen` / `mha_kvcache`):
 export VLLM_NT_BACKEND_CONFIG=/path/to/vllm-nt/vllm_nt/configs/pa-infinicore-flash-attn.yaml
 ```
 
-Both configs keep `StoreKVCache` on `infinicore`; only prefill/decode attention
-routing differs.
+All-infinicore-nt plus Flash-Attn wrapper attention:
+
+```bash
+export VLLM_NT_BACKEND_CONFIG=/path/to/vllm-nt/vllm_nt/configs/all-infinicore-nt-fa2.yaml
+```
+
+These attention configs keep `StoreKVCache` on `infinicore`; only
+prefill/decode attention routing differs.
 
 The Flash-Attn config has been smoke-tested with:
 

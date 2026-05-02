@@ -1,0 +1,32 @@
+version: 1
+defaults:
+  backend: original
+  fallback_backend: original
+  disable_backend_on_first_failure: true
+ops:
+  RMSNorm:
+    backend: infinicore
+  GemmaRMSNorm:
+    backend: infinicore
+  SiluAndMul:
+    backend: ninetoothed
+  ApplyRotaryEmb:
+    backend: ninetoothed
+  Embedding:
+    backend: ninetoothed
+  TopKTopP:
+    backend: ninetoothed
+  RandomSample:
+    backend: ninetoothed
+  MatMul:
+    backend: infinicore
+  LMHead:
+    backend: infinicore
+  StoreKVCache:
+    backend: infinicore
+  PagedAttentionPrefill:
+    backend: infinicore-flash-attn
+  PagedAttentionDecode:
+    backend: infinicore-flash-attn
+  SDPA:
+    backend: original
