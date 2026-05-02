@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -80,6 +81,23 @@ ops:
     )
     config = _reload_config(monkeypatch, cfg_path)
 
+    assert config.config_for("PagedAttentionPrefill").backend == "infinicore-flash-attn"
+    assert config.config_for("PagedAttentionDecode").backend == "infinicore-flash-attn"
+
+
+def test_all_infinicore_nt_fa2_config_only_switches_attention(monkeypatch):
+    config_path = (
+        Path(__file__).resolve().parents[1]
+        / "vllm_nt"
+        / "configs"
+        / "all-infinicore-nt-fa2.yaml"
+    )
+    config = _reload_config(monkeypatch, config_path)
+
+    assert config.config_for("RMSNorm").backend == "infinicore"
+    assert config.config_for("MatMul").backend == "infinicore"
+    assert config.config_for("SiluAndMul").backend == "ninetoothed"
+    assert config.config_for("StoreKVCache").backend == "infinicore"
     assert config.config_for("PagedAttentionPrefill").backend == "infinicore-flash-attn"
     assert config.config_for("PagedAttentionDecode").backend == "infinicore-flash-attn"
 
